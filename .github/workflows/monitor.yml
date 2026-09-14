@@ -1,0 +1,43 @@
+name: stock-monitor
+
+# 交易时段（北京时间 9:15-15:05）每 5 分钟检查一次。
+# cron 用 UTC：北京 9:15-15:05 = UTC 1:15-7:05，脚本内部还会再精确判断一次。
+on:
+  schedule:
+    - cron: '*/5 1-7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 防止上一次还没跑完下一次又启动，造成状态覆盖
+concurrency:
+  group: stock-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run monitor
+        env:
+          SENDKEY: ${{ secrets.SENDKEY }}
+        run: node alert.js
+
+      # 把运行状态（是否已提醒过）提交回仓库，实现"只提醒一次不刷屏"
+      - name: Save state
+        run: |
+          if [ -f state.json ] && ! git diff --quiet state.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: update state [skip ci]"
+            git push
+          fi
