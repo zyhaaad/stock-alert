@@ -1,0 +1,12 @@
+{
+  "_说明": "云端(GitHub Actions)版配置。sendKey 留空即可——推送钥匙存在仓库的 Secret（名字叫 SENDKEY）里，更安全。手机端用网页控制台编辑这个文件。",
+
+  "channel": "serverchan",
+  "sendKey": "",
+  "cooldownMinutes": 30,
+  "test": false,
+
+  "stocks": [
+    { "code": "600519", "name": "贵州茅台", "condition": "gte", "target": 1000, "enabled": true }
+  ]
+}
