@@ -4,5 +4,13 @@
   "sendKey": "",
   "cooldownMinutes": 30,
   "test": false,
-  "stocks": []
+  "stocks": [
+    {
+      "code": "002415",
+      "name": "海康威视",
+      "condition": "lte",
+      "target": 30,
+      "enabled": true
+    }
+  ]
 }
