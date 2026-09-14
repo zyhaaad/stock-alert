@@ -9,7 +9,7 @@
       "code": "002415",
       "name": "海康威视",
       "condition": "lte",
-      "target": 33.13,
+      "target": 31,
       "enabled": true
     }
   ]
