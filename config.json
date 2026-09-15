@@ -20,6 +20,14 @@
       "target": 3,
       "enabled": true,
       "addedAt": "2026-09-15"
+    },
+    {
+      "code": "601127",
+      "name": "赛力斯",
+      "condition": "lte",
+      "target": 31,
+      "enabled": true,
+      "addedAt": "2026-09-16"
     }
   ],
   "deleted": []
