@@ -11,6 +11,13 @@
       "condition": "lte",
       "target": 31,
       "enabled": true
+    },
+    {
+      "code": "600733",
+      "name": "北汽蓝谷",
+      "condition": "lte",
+      "target": 3,
+      "enabled": true
     }
   ]
 }
