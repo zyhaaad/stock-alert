@@ -1,5 +1,5 @@
 {
-  "_说明": "云端(GitHub Actions)版配置。sendKey 留空即可——推送钥匙存在仓库的 Secret（名字叫 SENDKEY）里，更安全。手机端用网页控制台编辑这个文件。",
+  "_说明": "云端(GitHub Actions)版配置。sendKey 留空即可——推送钥匙存在仓库的 Secret（名字叫 SENDKEY）里。手机端用网页控制台编辑：stocks 是正在监控的，deleted 是删除记录（含触发价，供查看触发后涨跌幅）。",
   "channel": "serverchan",
   "sendKey": "",
   "cooldownMinutes": 30,
@@ -10,14 +10,17 @@
       "name": "海康威视",
       "condition": "lte",
       "target": 31,
-      "enabled": true
+      "enabled": true,
+      "addedAt": "2026-09-15"
     },
     {
       "code": "600733",
       "name": "北汽蓝谷",
       "condition": "lte",
       "target": 3,
-      "enabled": true
+      "enabled": true,
+      "addedAt": "2026-09-15"
     }
-  ]
+  ],
+  "deleted": []
 }
