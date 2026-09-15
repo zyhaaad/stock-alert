@@ -4,15 +4,19 @@
  * ============================================================
  *  免费版 A 股价格监控  alert.js
  * ============================================================
- *  原理：Windows 任务计划程序每 5 分钟调用本脚本：
+ *  原理：定时任务（GitHub Actions 或 Windows 任务计划）每 5 分钟调用本脚本：
  *        1. 调东方财富公开接口拉取实时行情
  *        2. 逐只检查 config.json 里的价格条件
  *        3. 条件"从不满足变为满足"的那一刻，通过
  *           Server酱 / PushPlus / 企业微信机器人 推送到微信
+ *        4. 把运行状态写进 state.json（含首次触发价），供手机控制台的
+ *           「删除记录」计算"触发后至今涨跌幅"
  *
  *  用法：
- *    node alert.js            正常运行（由任务计划自动调用）
- *    node alert.js --dry      只打印行情和判断结果，不推送（测试用）
+ *    node alert.js             正常运行（由定时任务调用）
+ *    node alert.js --dry       只打印行情和判断结果，不推送、不记状态
+ *    node alert.js --simulate  模拟运行：忽略交易时段、不推送，但会更新状态
+ *                              （用于部署后验证逻辑，不会打扰你）
  *
  *  推送通道在 config.json 的 channel 里选：
  *    serverchan  Server酱（微信扫码 sct.ftqq.com 拿 SendKey）
@@ -206,6 +210,7 @@ function saveState(state) {
 async function main() {
   const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
   const dry = process.argv.includes('--dry')
+  const simulate = process.argv.includes('--simulate')
   const isTest = cfg.test === true
 
   const stocks = (cfg.stocks || []).filter(function (s) { return s.enabled !== false })
@@ -234,8 +239,8 @@ async function main() {
     return
   }
 
-  /* 正式运行：非交易时段静默退出（test 模式除外） */
-  if (!isTest && !inTradingHours()) return
+  /* 正式运行：非交易时段静默退出（test / simulate 模式除外） */
+  if (!isTest && !simulate && !inTradingHours()) return
 
   const state = loadState()
   const cooldownMs = (cfg.cooldownMinutes === undefined ? 30 : cfg.cooldownMinutes) * 60000
@@ -251,7 +256,9 @@ async function main() {
     const st = state[secidOf(s)] || { met: false, lastSent: 0 }
 
     let shouldSend = false
-    if (isTest) {
+    if (simulate) {
+      shouldSend = false // 模拟运行只判断、只记状态，绝不打扰
+    } else if (isTest) {
       shouldSend = true
     } else if (met && !st.met && now - st.lastSent > cooldownMs) {
       // 边沿触发：从不满足变为满足的那一刻才发，防止反复刷屏
@@ -268,6 +275,13 @@ async function main() {
         target: target
       })
       st.lastSent = now
+      st.fireCount = (st.fireCount || 0) + 1 // 真实推送次数
+    }
+
+    /* 触发点价格存档：首次满足价是"触发后至今涨跌幅"的基准，只记一次 */
+    if (met) {
+      if (!st.firstFire) st.firstFire = { price: q.price, at: now }
+      st.lastFire = { price: q.price, at: now }
     }
     st.met = met
     state[secidOf(s)] = st
@@ -286,7 +300,13 @@ async function main() {
     await pushMessage(cfg, title, lines.join('\n\n' + '-'.repeat(20) + '\n\n'))
     console.log(nowStr() + ' 已推送 ' + fired.length + ' 条：' + names)
   } else {
-    console.log(nowStr() + ' 检查 ' + stocks.length + ' 只，无触发')
+    console.log(nowStr() + (simulate ? ' 模拟运行，检查 ' : ' 检查 ') + stocks.length + ' 只，无触发')
+  }
+
+  if (isTest) {
+    // 测试推送不落状态，避免污染"首次触发价"存档
+    console.log(nowStr() + ' 测试模式：本次不写状态')
+    return
   }
 
   saveState(state)
