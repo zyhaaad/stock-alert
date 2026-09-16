@@ -1,0 +1,50 @@
+name: fng-daily
+
+# A股恐贪指数：每个交易日收盘后记录一个值，永久保存在 fng-history.json。
+# 跑两次的原因：
+#   16:05（北京）—— 收盘后算当天分值并写入存档
+#   22:05（北京）—— 刷新"两融快照"（两融数据 T 日晚上才披露），
+#                    这样次日盘中控制台算出来的值，与当晚云端的收盘值一致
+# cron 用 UTC：北京 16:05 = UTC 8:05；北京 22:05 = UTC 14:05
+on:
+  schedule:
+    - cron: '5 8 * * 1-5'
+    - cron: '5 14 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fng-daily
+  cancel-in-progress: false
+
+jobs:
+  fng:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Update fear & greed index
+        run: node fng.js
+
+      # 存档是全新文件时必须先 git add，git diff 才检测得到（与 state.json 同理）
+      # monitor.yml 也往同一分支推，所以 push 失败时先 rebase 再重试一次，
+      # 避免并发推送造成 non-fast-forward 把这次运行的数据丢掉。
+      - name: Commit archive
+        run: |
+          git add fng-history.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update fear & greed index [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "存档无变化"
+          fi
