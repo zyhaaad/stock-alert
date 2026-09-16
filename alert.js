@@ -26,6 +26,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const pushMod = require('./push.js')
 
 const DIR = __dirname
 const CONFIG_PATH = path.join(DIR, 'config.json')
@@ -141,54 +142,10 @@ async function fetchQuotes(secids) {
 
 /* ---------------- 推送 ---------------- */
 
+/* 推送实现在 push.js 里（单一真源，alert/fng/heartbeat 共用）。
+ * 好处：主通道挂了会自动降级到备用通道，且三个脚本行为一致。 */
 async function pushMessage(cfg, title, content) {
-  // 云端(GitHub Actions)运行时从仓库 Secrets 读 SENDKEY，本地运行用 config.json 里的 sendKey
-  const key = process.env.SENDKEY || cfg.sendKey
-
-  if (cfg.channel === 'serverchan') {
-    if (!key) throw new Error('没有配置 sendKey（本地填 config.json，云端配仓库 Secret SENDKEY）')
-    const res = await fetchJson(
-      'https://sctapi.ftqq.com/' + key + '.send',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ title: title, desp: content }).toString()
-      }
-    )
-    if (res.code !== 0) throw new Error('Server酱返回异常: ' + JSON.stringify(res))
-    return
-  }
-
-  if (cfg.channel === 'pushplus') {
-    if (!key) throw new Error('没有配置 sendKey（本地填 config.json，云端配仓库 Secret SENDKEY）')
-    const res = await fetchJson('https://www.pushplus.plus/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: key,
-        title: title,
-        content: content,
-        template: 'txt'
-      })
-    })
-    if (res.code !== 200) throw new Error('PushPlus返回异常: ' + JSON.stringify(res))
-    return
-  }
-
-  if (cfg.channel === 'wecombot') {
-    const res = await fetchJson(cfg.webhook, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        msgtype: 'text',
-        text: { content: title + '\n' + content }
-      })
-    })
-    if (res.errcode !== 0) throw new Error('企业微信机器人返回异常: ' + JSON.stringify(res))
-    return
-  }
-
-  throw new Error('未知的推送通道 channel=' + cfg.channel)
+  await pushMod.pushOrThrow(cfg, title, content)
 }
 
 /* ---------------- 状态 ---------------- */
