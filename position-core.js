@@ -3,16 +3,18 @@
  * ============================================================
  *  设计原则（与 fng-core.js 一致）
  *  1) 单一真源：云端（Node，V4 的「按盈亏提醒」要用）与手机控制台
- *     （浏览器）共用**同一份代码**，浏览器版由 _tests/inject-position-core.js
+ *     （浏览器）共用**同一份代码**，浏览器版由 _tests/inject-core.js
  *     原样注入 console.html 的 POSITION-CORE 标记块，杜绝两端算不一致。
  *  2) 「没记持仓」≠「持仓为 0」：前者一律返回 null，界面要显示
  *     「未记录持仓」，绝不能显示成 0 元盈亏——那是误导。
  *  3) 纯函数：不碰 DOM、不发请求、不读配置；行情价由调用方传进来。
  *
- *  字段约定（写在配置的股票对象上，两个都可选）
- *    cost  成本价（元/股，与行情同口径）
- *    qty   股数（A股 1 手 = 100 股）
- *  两者都 > 0 才算「记录了持仓」。
+ *  数据模型（V3 修正后）：持仓与监控是**两个独立的列表**
+ *    config.stocks[]   = 监控清单（提醒条件 / 目标价），**不含**成本与股数
+ *    config.holdings[] = 持仓清单（code / name / cost / qty）
+ *  同一个代码可以同时出现在两个列表里（既监控又持有，最常见），
+ *  也可以只出现在其中一个里（**持有着但不想要提醒** / **在监控但还没买**）。
+ *  成本价或股数任一缺失、非数、非正数，一律视为「没记持仓」。
  *
  *  盈亏口径
  *    成本金额 = cost × qty
@@ -204,9 +206,158 @@
     return '持仓 ' + fmtQty(p.qty) + ' 股 · 成本 ' + fmtNum(p.cost, 2);
   }
 
+  /* ============================================================
+   *  持仓清单（holdings）—— 与「监控清单」(stocks) 是**两个独立的列表**
+   * ============================================================
+   *  为什么必须分开：这两件事本来就是两批。
+   *    · 持有一只股票，但不需要价格提醒（长期拿着，不想被吵）
+   *    · 监控一只股票，但还没买（在等买点）
+   *  所以成本价/股数**不写在 stocks[] 上**，而是存在配置的 holdings[] 里：
+   *    holdings: [{ code, name, cost, qty, addedAt }]
+   *  同一个代码可以同时出现在两个列表里（既监控又持有），这是最常见的情况。
+   * ============================================================ */
+
+  /**
+   * 规范化一条持仓记录。
+   * @returns null 表示这条无效（代码不是 6 位数字，或成本/股数没填全）——
+   *          **绝不因为一条脏数据让整页算错**，所以无效记录一律被丢弃。
+   */
+  function normHolding(h) {
+    if (!h) return null;
+    var code = (h.code === null || h.code === undefined) ? '' : String(h.code).trim();
+    if (!/^\d{6}$/.test(code)) return null;
+    var cost = num(h.cost), qty = num(h.qty);
+    if (!(cost > 0) || !(qty > 0)) return null;
+    return {
+      code: code,
+      name: h.name ? String(h.name) : code,
+      cost: cost,
+      qty: qty,
+      addedAt: h.addedAt || null
+    };
+  }
+
+  /** 只保留有效持仓（过滤残缺记录） */
+  function validHoldings(holdings) {
+    var out = [], list = holdings || [];
+    for (var i = 0; i < list.length; i++) {
+      var r = normHolding(list[i]);
+      if (r) out.push(r);
+    }
+    return out;
+  }
+
+  /**
+   * 按代码查一条持仓。
+   * 注意：命中了代码但字段残缺时返回 null —— 语义等同「没记持仓」，
+   * 而不是返回一个成本为 0 的假记录。
+   */
+  function findHolding(holdings, code) {
+    var c = String(code), list = holdings || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].code) === c) return normHolding(list[i]);
+    }
+    return null;
+  }
+
+  /** 新增或更新一条持仓。返回**新数组**（不改原数组，方便直接赋回配置） */
+  function upsertHolding(holdings, rec) {
+    var r = normHolding(rec), list = holdings || [];
+    if (!r) return list.slice();
+    var out = [], done = false;
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].code) === r.code) {
+        if (!done) {                       // 同代码重复记录只保留第一条（顺手去重）
+          out.push({
+            code: r.code,
+            name: r.name || list[i].name || r.code,
+            cost: r.cost,
+            qty: r.qty,
+            addedAt: list[i].addedAt || r.addedAt || null
+          });
+          done = true;
+        }
+        continue;
+      }
+      out.push(list[i]);
+    }
+    if (!done) out.push({ code: r.code, name: r.name || r.code, cost: r.cost, qty: r.qty, addedAt: r.addedAt || null });
+    return out;
+  }
+
+  /** 删除一条持仓（按代码）。返回新数组 */
+  function removeHolding(holdings, code) {
+    var c = String(code), out = [], list = holdings || [];
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].code) !== c) out.push(list[i]);
+    }
+    return out;
+  }
+
+  /**
+   * 给每条持仓标上"是否也在监控中"。
+   * 界面据此显示「监控中」标签，或给"未监控"的持仓提供「加入监控」入口。
+   * @returns [{ holding, monitored }]
+   */
+  function holdingsWithFlag(holdings, stocks) {
+    var codes = {}, i, list = stocks || [];
+    for (i = 0; i < list.length; i++) codes[String(list[i].code)] = true;
+    var out = [], hs = holdings || [];
+    for (i = 0; i < hs.length; i++) {
+      var r = normHolding(hs[i]);
+      if (r) out.push({ holding: r, monitored: !!codes[r.code] });
+    }
+    return out;
+  }
+
+  /** 在监控列表里、但还没记持仓的股票（界面用来提供"快速添加持仓"） */
+  function monitoredWithoutHolding(stocks, holdings) {
+    var held = {}, i, list = stocks || [], hs = holdings || [];
+    for (i = 0; i < hs.length; i++) {
+      var r = normHolding(hs[i]);
+      if (r) held[r.code] = true;
+    }
+    var out = [];
+    for (i = 0; i < list.length; i++) {
+      if (!held[String(list[i].code)]) out.push(list[i]);
+    }
+    return out;
+  }
+
+  /**
+   * 旧结构迁移（V3 第一版把成本/股数写在了 stocks[] 上）。
+   * 把 stocks[].cost/qty 挪进 holdings，并把这两个字段从股票上摘掉。
+   * 幂等：已经迁移过再跑一次不会重复添加、也不会改动任何东西。
+   * @returns { stocks, holdings, changed }
+   */
+  function migrateLegacy(stocks, holdings) {
+    var hs = (holdings || []).slice(), outStocks = [], changed = false, list = stocks || [];
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i], s2 = {}, k;
+      for (k in s) {
+        if (Object.prototype.hasOwnProperty.call(s, k) && k !== 'cost' && k !== 'qty') s2[k] = s[k];
+      }
+      if (s.cost !== undefined || s.qty !== undefined) {
+        var r = normHolding(s);
+        if (r && !findHolding(hs, s.code)) hs = upsertHolding(hs, r);
+        changed = true;
+      }
+      outStocks.push(s2);
+    }
+    return { stocks: outStocks, holdings: hs, changed: changed };
+  }
+
   return {
     VERSION: VERSION,
     FEE_NOTE: FEE_NOTE,
+    normHolding: normHolding,
+    validHoldings: validHoldings,
+    findHolding: findHolding,
+    upsertHolding: upsertHolding,
+    removeHolding: removeHolding,
+    holdingsWithFlag: holdingsWithFlag,
+    monitoredWithoutHolding: monitoredWithoutHolding,
+    migrateLegacy: migrateLegacy,
     num: num,
     cleanNum: cleanNum,
     posOf: posOf,
