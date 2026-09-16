@@ -47,13 +47,13 @@
   var MIN_WIN = 60;   // 窗口最少样本数，不足则当日不出值
   var ANN = 244;      // 年化交易日数
 
-  /** 情绪分区（越大越贪婪） */
+  /** 情绪分区（越大越贪婪）。hint 必须是有指向的提示，不能是「观望为主」这类通用话术 */
   var ZONES = [
-    { min: 75, lvl: 4, text: '极度贪婪', hint: '市场过热，注意风险' },
-    { min: 60, lvl: 3, text: '贪婪', hint: '情绪偏热，资金活跃' },
-    { min: 40, lvl: 2, text: '中性', hint: '多空相对均衡' },
-    { min: 25, lvl: 1, text: '恐惧', hint: '情绪偏冷，观望为主' },
-    { min: -1, lvl: 0, text: '极度恐惧', hint: '市场冰冷，往往孕育机会' }
+    { min: 75, lvl: 4, text: '极度贪婪', hint: '情绪亢奋、赚钱效应最好，也最容易套人' },
+    { min: 60, lvl: 3, text: '贪婪', hint: '资金活跃、情绪偏热，适合逐步兑现而非继续加仓' },
+    { min: 40, lvl: 2, text: '中性', hint: '多空相对均衡，情绪本身不提供方向' },
+    { min: 25, lvl: 1, text: '恐惧', hint: '情绪偏冷，是分批布局的区间而不是清仓的区间' },
+    { min: -1, lvl: 0, text: '极度恐惧', hint: '情绪冰冷、持股难受，但往往离回暖最近——别割在低点' }
   ];
 
   /** 曲线周期（n=交易日数，0 表示全部） */
@@ -326,6 +326,168 @@
   /** 交易日推算：把 n 个交易日折算成日历天数（用于抓取足够的 K 线） */
   function calendarDaysFor(n) { return Math.ceil(n * 365 / ANN * 1.15) + 30; }
 
+  /* ---------------- 操作建议（与 ZONES 一一对应，索引 = lvl） ----------------
+   * 分组前瞻收益为实证结果：2022-02 ~ 2026-09 共 1120 个有效交易日，
+   * 按当日分值分组后统计「之后 60 个交易日」的平均涨跌幅。
+   * 建议必须与所处阶段强相关，禁止出现"观望为主"这种放之四海皆准的空话。
+   * -------------------------------------------------------------------- */
+
+  var FORWARD = {
+    fear:    { n: 380, r60:  4.02, label: '恐惧区（<40）' },
+    neutral: { n: 357, r60:  0.63, label: '中性区（40–60）' },
+    greed:   { n: 383, r60: -0.67, label: '贪婪区（≥60）' }
+  };
+
+  /** lvl → 前瞻统计分组键 */
+  function zoneKey(lvl) { return lvl <= 1 ? 'fear' : (lvl === 2 ? 'neutral' : 'greed'); }
+
+  var SHARED_NOTE = '以上是历史统计规律，不是对点位的预测。它的用处只有一个：'
+    + '在别人最恐慌的时候别割肉，在别人最亢奋的时候别追高。这两件事做到，长期结果就明显不同。';
+
+  var ADVICE = [
+    { /* lvl 0 极度恐惧 */
+      view: '近一年最冷的位置。历史上这一类区间之后 60 个交易日平均是「涨」的，但过程通常很难受：'
+        + '可能还有最后一跌，阴跌、放量杀跌、反复磨底都很常见。'
+        + '换句话说——「持股体验最差」和「离回暖最近」，往往就是同一段时间。',
+      do: [
+        '这本来就是给「想买但一直没敢买」的人准备的区间：把计划资金分成 3~4 份，逢大跌加一份，而不是等「跌到位」再一次性买。',
+        '已经持仓的，先确认基本面有没有变坏；没变坏就扛住，不要在这里降低仓位。',
+        '定投照常扣款，手上有闲钱可以适度加大。'
+      ],
+      dont: [
+        '不要在这个位置割肉。恐贪到冰点时卖出，等于把最差的持股体验兑现成实际亏损，而后面大概率出现的回暖就与你无关了。',
+        '不要因为「跌得看不懂」就清仓重来——那通常是恐慌传染，不是分析结论。'
+      ]
+    },
+    { /* lvl 1 恐惧 */
+      view: '情绪偏冷但还没到极端。历史同类区间之后 60 日的平均收益仍为正，只是幅度小于极度恐惧，'
+        + '中间往往还有一两次反复，别指望一买就涨。',
+      do: [
+        '分批建仓的合适区间：先建到计划仓位的一半左右，留出后续加仓空间。',
+        '已有仓位继续持有；现金比例别压到 0，也别全留现金。',
+        '重点看那些「跌了很久、但基本面没坏」的品种，这类在回暖初期弹性通常最大。'
+      ],
+      dont: [
+        '不要因为「还没跌够」就一直等——等你确认反转时，第一波涨幅往往已经走完。',
+        '也不要一次把子弹打光，情绪还有继续变冷的空间。'
+      ]
+    },
+    { /* lvl 2 中性 */
+      view: '多空相对均衡。历史上中性区间之后 60 日平均只有 +0.6% 左右，接近随机：'
+        + '这个阶段的涨跌主要由基本面和事件驱动，情绪本身不提供方向。',
+      do: [
+        '按你原本的计划执行：定投照常、调仓照常。这个阶段靠的是选股和纪律，不是情绪择时。',
+        '把注意力放在持仓质量上：业绩、估值、买入逻辑有没有发生变化。'
+      ],
+      dont: [
+        '不要因为「最近涨了」就加杠杆追进去，也不要因为「最近跌了」就恐慌减仓——这是情绪信号最弱、最容易两头挨打的区间。'
+      ]
+    },
+    { /* lvl 3 贪婪 */
+      view: '情绪偏热、资金活跃。历史上贪婪区间之后 60 个交易日平均是「负收益」，'
+        + '而且回撤往往比预期来得快——高位的第一根大阴线，常常就是情绪反转的开始。',
+      do: [
+        '开始兑现一部分浮盈：可以按「每涨一档减一点」的节奏，把仓位降到你能睡得着觉的水平。',
+        '停止新开仓和加仓，把注意力从「还能赚多少」转到「能保住多少」。'
+      ],
+      dont: [
+        '不要加杠杆。',
+        '不要抱着「再赚一波就走」的念头——情绪高位时，大多数人正是被这句话套住的。'
+      ]
+    },
+    { /* lvl 4 极度贪婪 */
+      view: '近一年最热的位置：赚钱效应最好、群里最热闹，也最容易套人。'
+        + '历史同类区间之后 60 日平均负收益，且常伴随急跌。',
+      do: [
+        '这个区间的正确动作是「减仓」（不是清仓）：优先卖出涨幅最大、最投机的部分，保留基本面最扎实的底仓。',
+        '设好止盈线并执行，把一部分利润真正落袋，而不是停留在浮动收益上。',
+        '留出足够现金，为下一次情绪变冷时的分批买入做准备。'
+      ],
+      dont: [
+        '不要在这里追高买入，尤其是「看到别人赚钱」才决定进场——那就是典型的追在高点。',
+        '不要满仓过节、满仓过周末。'
+      ]
+    }
+  ];
+
+  /** 取某分值的建议（含前瞻实证），分值非法返回 null */
+  function adviceOf(v) {
+    if (v == null || isNaN(v)) return null;
+    var z = zone(v);
+    var a = ADVICE[z.lvl];
+    if (!a) return null;
+    var f = FORWARD[zoneKey(z.lvl)];
+    return {
+      lvl: z.lvl, zone: z.text, hint: z.hint,
+      view: a.view, do: a.do, dont: a.dont,
+      forward: f, note: SHARED_NOTE
+    };
+  }
+
+  /* ---------------- 情绪极值事件（用于主动推送） ----------------
+   * 目的：把"别割在低点、别追在高点"从一句建议，变成在情绪走到极值时
+   *       主动响一次的通知。用边沿触发（只在进入/离开极值区那天提醒），
+   *       不做每天都推的噪音源。
+   * ------------------------------------------------------------ */
+
+  /** 极值提醒阈值；可用 config.json 的 fngAlert 覆盖 */
+  var EXTREME = { low: 20, high: 80 };
+  /** 长期停在极值区时，每隔这么多个交易日再提醒一次 */
+  var REMIND_EVERY = 5;
+
+  var EXTREME_KIND = {
+    'enter-low': { dir: 'low', title: '情绪冰点' },
+    'enter-high': { dir: 'high', title: '情绪过热' },
+    'leave-low': { dir: 'low', title: '情绪回暖' },
+    'leave-high': { dir: 'high', title: '情绪降温' }
+  };
+
+  function clampThr(v, dft) { return (v == null || isNaN(v)) ? dft : Number(v); }
+
+  /**
+   * 判断是否发生"情绪极值切换"（边沿触发）。
+   * 没有前值（第一次运行/历史不足）一律返回 null，避免误报。
+   * @returns {null | {kind, dir, title, prev, cur}}
+   */
+  function extremeEvent(prevV, curV, opts) {
+    opts = opts || {};
+    if (curV == null || isNaN(curV)) return null;
+    if (prevV == null || isNaN(prevV)) return null;
+    var lo = clampThr(opts.low, EXTREME.low), hi = clampThr(opts.high, EXTREME.high);
+    var nowLow = curV <= lo, nowHigh = curV >= hi;
+    var wasLow = prevV <= lo, wasHigh = prevV >= hi;
+    var kind = null;
+    if (nowLow && !wasLow) kind = 'enter-low';
+    else if (nowHigh && !wasHigh) kind = 'enter-high';
+    else if (wasLow && !nowLow) kind = 'leave-low';
+    else if (wasHigh && !nowHigh) kind = 'leave-high';
+    if (!kind) return null;
+    var m = EXTREME_KIND[kind];
+    return { kind: kind, dir: m.dir, title: m.title, prev: prevV, cur: curV };
+  }
+
+  /**
+   * 截至最后一天、连续处于极值区的交易日数（含最后一天）。
+   * 纯函数：只依赖序列本身，所以重复运行不会算出不同结果（幂等）。
+   */
+  function extremeStreak(series, opts) {
+    opts = opts || {};
+    var lo = clampThr(opts.low, EXTREME.low), hi = clampThr(opts.high, EXTREME.high);
+    var n = 0;
+    for (var i = (series || []).length - 1; i >= 0; i--) {
+      var v = series[i].v;
+      if (v == null || isNaN(v)) break;
+      if (v <= lo || v >= hi) n++;
+      else break;
+    }
+    return n;
+  }
+
+  /** 长期停在极值区时的周期性提醒（第 5、10、15… 个交易日） */
+  function isReminderDay(streak) {
+    return streak > 1 && streak % REMIND_EVERY === 0;
+  }
+
   return {
     VERSION: VERSION,
     COMPONENTS: COMPONENTS,
@@ -350,6 +512,17 @@
     packSeries: packSeries,
     unpackSeries: unpackSeries,
     sig: sig,
-    calendarDaysFor: calendarDaysFor
+    calendarDaysFor: calendarDaysFor,
+    FORWARD: FORWARD,
+    ADVICE: ADVICE,
+    SHARED_NOTE: SHARED_NOTE,
+    zoneKey: zoneKey,
+    adviceOf: adviceOf,
+    EXTREME: EXTREME,
+    REMIND_EVERY: REMIND_EVERY,
+    EXTREME_KIND: EXTREME_KIND,
+    extremeEvent: extremeEvent,
+    extremeStreak: extremeStreak,
+    isReminderDay: isReminderDay
   };
 });
