@@ -36,7 +36,16 @@
       "target": 39,
       "enabled": true,
       "addedAt": "2026-09-16"
+    },
+    {
+      "code": "600058",
+      "name": "五矿发展",
+      "condition": "lte",
+      "target": 7.5,
+      "enabled": true,
+      "addedAt": "2026-09-16"
     }
   ],
-  "deleted": []
+  "deleted": [],
+  "holdings": []
 }
