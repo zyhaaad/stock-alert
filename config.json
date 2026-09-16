@@ -47,5 +47,13 @@
     }
   ],
   "deleted": [],
-  "holdings": []
+  "holdings": [
+    {
+      "code": "600703",
+      "name": "三安光电",
+      "cost": 12.5,
+      "qty": 300,
+      "addedAt": null
+    }
+  ]
 }
