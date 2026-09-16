@@ -32,6 +32,11 @@ jobs:
 
       - name: Update fear & greed index
         run: node fng.js
+        env:
+          # 情绪极值主动推送（V1）用的通道密钥；与 monitor.yml 共用同一批 Secret
+          SENDKEY: ${{ secrets.SENDKEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
 
       # 存档是全新文件时必须先 git add，git diff 才检测得到（与 state.json 同理）
       # monitor.yml 也往同一分支推，所以 push 失败时先 rebase 再重试一次，
