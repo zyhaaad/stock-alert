@@ -1,0 +1,51 @@
+name: heartbeat
+
+# 任务心跳与失败告警（V2）
+#
+# 为什么放在 23:40（北京）：这一天的两个关键任务都已经跑完了
+#   16:05 恐贪定稿、22:05 刷新两融、盘中每 5 分钟价格监控
+# 这时自检，才能确定"今天该干的活真的干完了"。
+# cron 用 UTC：北京 23:40 = UTC 15:40
+on:
+  schedule:
+    - cron: '40 15 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '无视交易日判断，强制自检'
+        type: boolean
+        default: true
+      weekly:
+        description: '强制输出周报'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read        # 需要读 workflow 运行记录，才能判断"今天到底跑没跑成功"
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Self check
+        run: |
+          node heartbeat.js \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '--force' || '' }} \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.weekly) && '--weekly' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SENDKEY: ${{ secrets.SENDKEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
