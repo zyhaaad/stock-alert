@@ -28,6 +28,14 @@
       "target": 31,
       "enabled": true,
       "addedAt": "2026-09-16"
+    },
+    {
+      "code": "002714",
+      "name": "牧原股份",
+      "condition": "lte",
+      "target": 39,
+      "enabled": true,
+      "addedAt": "2026-09-16"
     }
   ],
   "deleted": []
