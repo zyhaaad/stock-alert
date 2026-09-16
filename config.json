@@ -54,6 +54,13 @@
       "cost": 12.5,
       "qty": 300,
       "addedAt": null
+    },
+    {
+      "code": "603026",
+      "name": "石大胜华",
+      "cost": 68,
+      "qty": 500,
+      "addedAt": null
     }
   ]
 }
