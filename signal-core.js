@@ -14,8 +14,12 @@
  *  ⚠️ 定位：研究型信号 + 胜率追踪，**不是投资建议**。
  *     小样本（前几周）的胜率没有参考意义。
  *
- *  信号口径（R1 版，2026-09-16 与用户确认）：
+ *  信号口径（R2 版，2026-09-17 用户新增第 6 条规则）：
  *   止盈类（side='sell'，涨太猛先落袋）
+ *     MA5_STREAK_EXIT 连续 ≥2 日 开盘&收盘都站上 5 日线 → 提醒卖出
+ *                    ——即用户 2026-09-17 说的「连续 2 天及以上都高于 5 日线就提醒卖出」。
+ *                      与 HOT_MA5_BIAS 的区别：**不加乖离条件**，门槛更低、更常触发；
+ *                      与「持仓页 5 日线标识」用的是同一套天数口径（见 ma5Streak）。
  *     HOT_MA5_BIAS   连续 ≥2 日 开盘&收盘都站上 5 日线，且 5 日乖离率 ≥ +6%
  *                    ——即用户说的「连续2天在5日线上」，加上乖离过大才算过热，
  *                      否则按字面会天天喊卖，与中长期持股习惯冲突
@@ -40,13 +44,14 @@
   'use strict';
 
   var VERSION = 1;
-  var RULE_VERSION = 'R1';
+  var RULE_VERSION = 'R2';
 
   /* ---------------- 参数（集中在这一处，改参数必须同时升 RULE_VERSION） ---------------- */
   var P = {
     biasMa: 5,             // 乖离率用的均线
     biasHoldDays: 2,       // 连续 ≥2 日开盘&收盘都站上该均线
     biasThreshold: 0.06,   // 5 日乖离率 ≥ +6% 视为短线过热
+    ma5ExitDays: 2,        // 离场提醒：连续 ≥2 日开盘&收盘都站上 5 日线（用户 2026-09-17 指定，不加乖离条件）
     trendMa: 20,           // 趋势线
     trendMaSlope: 5,       // 用 5 根前的 20 日线判断走向
     grindDays: 10,         // 阴跌：连续收在趋势线下方的天数
@@ -167,6 +172,30 @@
    *  统一约定：side='sell' 提醒卖出/离场，side='buy' 提醒关注介入。
    * ============================================================ */
 
+  /** 止盈类（用户 2026-09-17 指定）：连续 ≥2 日开收盘都站上 5 日线 → 提醒卖出
+   *
+   *  用户原话：「日线开盘、收盘价格连续 2 天及以上都高于 5 日线价格，就提醒卖出显示及信息提示」。
+   *  与 rHotMa5Bias 的区别：**不加 5 日乖离条件**，门槛更低、更常触发。
+   *
+   *  天数口径**直接复用 ma5Streak**（持仓页那个状态标识）——
+   *  保证「推送里说的天数」和「持仓页显示的天数」永远是同一个数；
+   *  两处各写一份必然会漂移，这是本项目的硬约定（算法单一真源）。
+   *
+   *  防轰炸：靠 cooldownDays（5 个交易日）。这个条件是**持续满足型**，
+   *  不设冷却就会在连涨期间天天喊卖；设了之后最多每 5 个交易日提醒一次。 */
+  function rMa5StreakExit(bars, i, ind) {
+    if (!isFinite(ind.ma5)) return null;
+    var st = ma5Streak(bars, i);
+    var need = P.ma5ExitDays;
+    if (!(st.days >= need)) return null;
+    return {
+      rule: 'MA5_STREAK_EXIT', side: 'sell',
+      title: '连续站上 5 日线',
+      detail: '连续 ' + st.days + ' 天开盘收盘都站上 5 日线（' + st.from + ' 起），短线偏热，按纪律可先落袋一部分 —— 是减仓提示，不是必须清仓',
+      price: bars[i].c, at: bars[i].d
+    };
+  }
+
   /** 止盈类：连续 N 日开收都站上**各自当天**的 5 日线 + 乖离过大 → 短线过热
    *  口径（用户 2026-09-16 确认）：每一天都用「截止到当日收盘」算出的 5 日线来比，
    *  即第 k 天跟 maAt(bars, k, 5) 比，不是拿今天的均线去套历史。 */
@@ -261,7 +290,7 @@
     };
   }
 
-  var RULES = [rHotMa5Bias, rNearPrevHigh, rTrendBreak, rGrindDown, rBottomReclaim];
+  var RULES = [rMa5StreakExit, rHotMa5Bias, rNearPrevHigh, rTrendBreak, rGrindDown, rBottomReclaim];
 
   /**
    * 对某只股票的最后一根（或指定根）K 线跑全部规则。
@@ -357,6 +386,67 @@
     return out;
   }
 
+  /**
+   * 5 日线连续站上 —— **用户 2026-09-17 指定的持仓状态标识口径**
+   *
+   *   「日线开盘、收盘价格连续 2 天及以上都高于 5 日线价格，就提醒卖出并给信息提示；
+   *     只有 1 天高于 5 日线就给出天数标识；一天都没有则不显示。」
+   *
+   *  与 rHotMa5Bias（HOT_MA5_BIAS 信号）的区别，别混：
+   *    · rHotMa5Bias 是**云端推送用的过热信号**，额外要求 5 日乖离 ≥ +6%，
+   *      门槛高、不常触发，用于"涨太猛了先落袋"。
+   *    · ma5Streak 是**持仓页的状态标识**，只看天数、不加乖离条件，
+   *      用于每天都能看到"这只票在 5 日线上站了几天"。
+   *
+   *  口径细节：每一天都跟「截止到该日收盘算出的 5 日线」比（逐日各用自己的均线），
+   *  不是拿今天的均线去套历史 —— 与 rHotMa5Bias 完全一致，避免口径漂移。
+   *
+   * @param bars   升序 K 线（{d,o,c,h,l,v}）
+   * @param endIdx 截止到哪一根（默认最后一根）
+   * @returns { days, sig, ma5, from, to }
+   *   days = 从最新往前连续站上的天数（0 表示最新一天就没站上）
+   *   sig  = days>=2 → 'sell'（提醒卖出）；days===1 → 'watch'（只标天数）；0 → null（不显示）
+   */
+  function ma5Streak(bars, endIdx) {
+    if (!bars || !bars.length) return { days: 0, sig: null, ma5: NaN, from: '', to: '' };
+    var i = (typeof endIdx === 'number' && endIdx >= 0 && endIdx < bars.length) ? endIdx : bars.length - 1;
+    var n = 0;
+    for (var k = i; k >= 0; k--) {
+      var m = maAt(bars, k, P.biasMa);
+      if (!isFinite(m)) break;
+      if (bars[k].o > m && bars[k].c > m) n++;
+      else break;
+    }
+    var sig = (n >= P.biasHoldDays) ? 'sell' : (n === 1 ? 'watch' : null);
+    return {
+      days: n, sig: sig,
+      ma5: maAt(bars, i, P.biasMa),
+      from: n > 0 ? bars[i - n + 1].d : '',
+      to: n > 0 ? bars[i].d : ''
+    };
+  }
+
+  /**
+   * 按「清单类型」过滤信号 —— 清单语义的单一真源。
+   *
+   *   监控清单（listKind='monitor'，只监控、还没买）：
+   *     不收 MA5_STREAK_EXIT。用户 2026-09-17 的原话是「**持仓股**……连续 2 天及以上
+   *     都高于 5 日线就提醒卖出」—— 对一只还没买的票喊"卖出"没有意义，
+   *     反而会让人以为自己持有。其余信号（跌破 20 日线、超跌企稳等）照常收。
+   *   持仓清单（'holdings' / 'both'，真金白银在里面）：
+   *     全收，含 MA5_STREAK_EXIT。
+   *
+   * ⚠️ 放在核心里的原因：过滤规则是"业务口径"，测试必须能直接调它，
+   *    而不是在测试里复制一遍表达式（复制出来的那份迟早和线上不一致）。
+   */
+  function signalsForList(signals, listKind) {
+    var list = signals || [];
+    if (listKind === 'monitor') {
+      return list.filter(function (s) { return s.rule !== 'MA5_STREAK_EXIT'; });
+    }
+    return list.slice();
+  }
+
   return {
     VERSION: VERSION,
     RULE_VERSION: RULE_VERSION,
@@ -373,6 +463,8 @@
     evaluateRange: evaluateRange,
     closeAfter: closeAfter,
     judgeOutcome: judgeOutcome,
-    winrateStats: winrateStats
+    winrateStats: winrateStats,
+    ma5Streak: ma5Streak,
+    signalsForList: signalsForList
   };
 });
