@@ -266,9 +266,8 @@ async function main() {
   const picks = loadPicks()
 
   if (report) {
-    const st = S.winrateStats((picks.picks || []).map(p => ({
-      rule: 'PICK', verdict: p.verdict || { state: 'pending' }
-    })))
+    /* ⚠️ 这里原来还调了一次 S.winrateStats(...) 但结果没被用过（下面是自己数的胜率）。
+       顺手删掉：它传的行没有 ruleVersion，将来一旦启用了"按版本隔离统计"就会静默变成 0 样本。 */
     const done = (picks.picks || []).filter(p => p.verdict && p.verdict.state !== 'pending')
     const wins = done.filter(p => p.verdict.state === 'win').length
     console.log('备选池体检：共 ' + (picks.picks || []).length + ' 条，已判定 ' + done.length +
