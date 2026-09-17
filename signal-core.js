@@ -14,12 +14,16 @@
  *  ⚠️ 定位：研究型信号 + 胜率追踪，**不是投资建议**。
  *     小样本（前几周）的胜率没有参考意义。
  *
- *  信号口径（R2 版，2026-09-17 用户新增第 6 条规则）：
+ *  信号口径（R3 版，2026-09-17 用户新增"多头排列"前提）：
  *   止盈类（side='sell'，涨太猛先落袋）
  *     MA5_STREAK_EXIT 连续 ≥2 日 开盘&收盘都站上 5 日线 → 提醒卖出
  *                    ——即用户 2026-09-17 说的「连续 2 天及以上都高于 5 日线就提醒卖出」。
  *                      与 HOT_MA5_BIAS 的区别：**不加乖离条件**，门槛更低、更常触发；
  *                      与「持仓页 5 日线标识」用的是同一套天数口径（见 ma5Streak）。
+ *     ⚠️ **前提（用户 2026-09-17 追加）：必须均线多头排列 —— MA5 > MA10 > MA20 > MA30，
+ *        否则这条判断整体不生效**（不触发推送，持仓页也不显示天数标识）。
+ *        理由：均线纠缠/空头排列时，单日"站上 5 日线"只是噪声，不是短线偏热。
+ *        实现放在 maAlign()，是这条前提的**单一真源**（规则与界面都走它）。
  *     HOT_MA5_BIAS   连续 ≥2 日 开盘&收盘都站上 5 日线，且 5 日乖离率 ≥ +6%
  *                    ——即用户说的「连续2天在5日线上」，加上乖离过大才算过热，
  *                      否则按字面会天天喊卖，与中长期持股习惯冲突
@@ -44,7 +48,9 @@
   'use strict';
 
   var VERSION = 1;
-  var RULE_VERSION = 'R2';
+  /* ★ R3（2026-09-17）：MA5_STREAK_EXIT 增加「均线多头排列」前提（MA5>MA10>MA20>MA30）。
+     改规则/参数必须升版本，否则新旧胜率会被混在一起统计（本项目硬约定）。 */
+  var RULE_VERSION = 'R3';
 
   /* ---------------- 参数（集中在这一处，改参数必须同时升 RULE_VERSION） ---------------- */
   var P = {
@@ -52,6 +58,7 @@
     biasHoldDays: 2,       // 连续 ≥2 日开盘&收盘都站上该均线
     biasThreshold: 0.06,   // 5 日乖离率 ≥ +6% 视为短线过热
     ma5ExitDays: 2,        // 离场提醒：连续 ≥2 日开盘&收盘都站上 5 日线（用户 2026-09-17 指定，不加乖离条件）
+    alignMas: [5, 10, 20, 30],  // ★ 多头排列要逐级比较的均线：MA5 > MA10 > MA20 > MA30（用户 2026-09-17 指定的前提）
     trendMa: 20,           // 趋势线
     trendMaSlope: 5,       // 用 5 根前的 20 日线判断走向
     grindDays: 10,         // 阴跌：连续收在趋势线下方的天数
@@ -177,6 +184,10 @@
    *  用户原话：「日线开盘、收盘价格连续 2 天及以上都高于 5 日线价格，就提醒卖出显示及信息提示」。
    *  与 rHotMa5Bias 的区别：**不加 5 日乖离条件**，门槛更低、更常触发。
    *
+   *  ⚠️ **前提**（用户 2026-09-17 追加）：「5 日线 > 10 日线 > 20 日线 > 30 日线」时才有效，
+   *     其他情况不触发判断。判定在 maAlign（单一真源），这里显式挡一道让规则读得懂；
+   *     ma5Streak 内部也会用它，所以推送与持仓页标识**永远同时生效或同时不生效**。
+   *
    *  天数口径**直接复用 ma5Streak**（持仓页那个状态标识）——
    *  保证「推送里说的天数」和「持仓页显示的天数」永远是同一个数；
    *  两处各写一份必然会漂移，这是本项目的硬约定（算法单一真源）。
@@ -185,13 +196,15 @@
    *  不设冷却就会在连涨期间天天喊卖；设了之后最多每 5 个交易日提醒一次。 */
   function rMa5StreakExit(bars, i, ind) {
     if (!isFinite(ind.ma5)) return null;
+    if (!maAlign(bars, i).ok) return null;          // ★ 非多头排列 → 不触发判断（用户 2026-09-17）
     var st = ma5Streak(bars, i);
     var need = P.ma5ExitDays;
     if (!(st.days >= need)) return null;
     return {
       rule: 'MA5_STREAK_EXIT', side: 'sell',
       title: '连续站上 5 日线',
-      detail: '连续 ' + st.days + ' 天开盘收盘都站上 5 日线（' + st.from + ' 起），短线偏热，按纪律可先落袋一部分 —— 是减仓提示，不是必须清仓',
+      detail: '连续 ' + st.days + ' 天开盘收盘都站上 5 日线（' + st.from + ' 起），且均线多头排列' +
+        '（5 日 > 10 日 > 20 日 > 30 日），短线偏热，按纪律可先落袋一部分 —— 是减仓提示，不是必须清仓',
       price: bars[i].c, at: bars[i].d
     };
   }
@@ -387,14 +400,53 @@
   }
 
   /**
+   * 均线多头排列 —— **用户 2026-09-17 明确的判断前提**
+   *
+   *   原话：「当 5 日线大于 10 日线，10 日线大于 20 日线，20 日线大于 30 日线情况下才有效，
+   *          其他情况不触发判断。」
+   *
+   *   即严格逐级递减：MA5 > MA10 > MA20 > MA30（都用**截止当日**收盘算出来的值）。
+   *   任何一级不满足（含数据不足 30 根算不出 30 日线）→ ok=false。
+   *
+   *  ⚠️ 这是「5 日线连续站上」这条口径的**单一真源**：
+   *     · 云端推送规则 rMa5StreakExit 走它；
+   *     · 持仓页/首页的 5 日线标识（ma5Streak）也走它。
+   *     两者必须同时生效/同时不生效，否则会出现"页面提示落袋、微信却没推"的错位。
+   *
+   * @param bars   升序 K 线（{d,o,c,h,l,v}）
+   * @param endIdx 截止到哪一根（默认最后一根）
+   * @returns { ok, ma5, ma10, ma20, ma30 }   ok=false 时四个均线可能含 NaN
+   */
+  function maAlign(bars, endIdx) {
+    var miss = { ok: false, ma5: NaN, ma10: NaN, ma20: NaN, ma30: NaN };
+    if (!bars || !bars.length) return miss;
+    var i = (typeof endIdx === 'number' && endIdx >= 0 && endIdx < bars.length) ? endIdx : bars.length - 1;
+    var ns = P.alignMas, vs = [], k;
+    for (k = 0; k < ns.length; k++) {
+      var m = maAt(bars, i, ns[k]);
+      if (!isFinite(m)) return miss;                 // 少一根均线就算不出来 → 前提不成立（不硬算）
+      vs.push(m);
+    }
+    var ok = true;
+    for (k = 1; k < vs.length; k++) {
+      if (!(vs[k - 1] > vs[k])) { ok = false; break } // 逐级比：5>10>20>30，相等也不算
+    }
+    return { ok: ok, ma5: vs[0], ma10: vs[1], ma20: vs[2], ma30: vs[3] };
+  }
+
+  /**
    * 5 日线连续站上 —— **用户 2026-09-17 指定的持仓状态标识口径**
    *
    *   「日线开盘、收盘价格连续 2 天及以上都高于 5 日线价格，就提醒卖出并给信息提示；
    *     只有 1 天高于 5 日线就给出天数标识；一天都没有则不显示。」
    *
+   *   ⚠️ **前提（用户 2026-09-17 追加）**：必须均线多头排列（MA5>MA10>MA20>MA30，见 maAlign）。
+   *      不满足 → 整条判断不生效：days=0、sig=null（持仓页不渲染任何 5 日线标识、推送也不发）。
+   *      这不是"扣分项"而是"开关"—— 均线纠缠时站上 5 日线只是噪声。
+   *
    *  与 rHotMa5Bias（HOT_MA5_BIAS 信号）的区别，别混：
    *    · rHotMa5Bias 是**云端推送用的过热信号**，额外要求 5 日乖离 ≥ +6%，
-   *      门槛高、不常触发，用于"涨太猛了先落袋"。
+   *      门槛高、不常触发，用于"涨太猛了先落袋"。**该规则不受多头排列限制**（它自带乖离门槛）。
    *    · ma5Streak 是**持仓页的状态标识**，只看天数、不加乖离条件，
    *      用于每天都能看到"这只票在 5 日线上站了几天"。
    *
@@ -403,13 +455,24 @@
    *
    * @param bars   升序 K 线（{d,o,c,h,l,v}）
    * @param endIdx 截止到哪一根（默认最后一根）
-   * @returns { days, sig, ma5, from, to }
-   *   days = 从最新往前连续站上的天数（0 表示最新一天就没站上）
+   * @returns { days, sig, ma5, from, to, aligned, ma10, ma20, ma30 }
+   *   aligned = 是否满足均线多头排列（MA5>MA10>MA20>MA30）—— 为 false 时 days 恒为 0
+   *   days = 从最新往前连续站上的天数（0 表示最新一天没站上，或前提不成立）
    *   sig  = days>=2 → 'sell'（提醒卖出）；days===1 → 'watch'（只标天数）；0 → null（不显示）
    */
   function ma5Streak(bars, endIdx) {
-    if (!bars || !bars.length) return { days: 0, sig: null, ma5: NaN, from: '', to: '' };
+    if (!bars || !bars.length) return { days: 0, sig: null, ma5: NaN, from: '', to: '', aligned: false };
     var i = (typeof endIdx === 'number' && endIdx >= 0 && endIdx < bars.length) ? endIdx : bars.length - 1;
+    var al = maAlign(bars, i);
+    /* ★ 多头排列前提不成立 → 整条判断不生效（用户 2026-09-17：「其他情况不触发判断」）：
+       days 直接给 0，界面按既有约定"0 天不渲染"，推送也不会触发。 */
+    if (!al.ok) {
+      return {
+        days: 0, sig: null, ma5: maAt(bars, i, P.biasMa),
+        from: '', to: '', aligned: false,
+        ma10: al.ma10, ma20: al.ma20, ma30: al.ma30
+      };
+    }
     var n = 0;
     for (var k = i; k >= 0; k--) {
       var m = maAt(bars, k, P.biasMa);
@@ -422,7 +485,9 @@
       days: n, sig: sig,
       ma5: maAt(bars, i, P.biasMa),
       from: n > 0 ? bars[i - n + 1].d : '',
-      to: n > 0 ? bars[i].d : ''
+      to: n > 0 ? bars[i].d : '',
+      aligned: true,
+      ma10: al.ma10, ma20: al.ma20, ma30: al.ma30
     };
   }
 
@@ -465,6 +530,7 @@
     judgeOutcome: judgeOutcome,
     winrateStats: winrateStats,
     ma5Streak: ma5Streak,
+    maAlign: maAlign,
     signalsForList: signalsForList
   };
 });
