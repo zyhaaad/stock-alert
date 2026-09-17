@@ -44,6 +44,14 @@
       "target": 7.5,
       "enabled": true,
       "addedAt": "2026-09-16"
+    },
+    {
+      "code": "002594",
+      "name": "比亚迪",
+      "condition": "lte",
+      "target": 81.5,
+      "enabled": true,
+      "addedAt": "2026-09-17"
     }
   ],
   "deleted": [],
