@@ -61,6 +61,13 @@
       "cost": 68,
       "qty": 500,
       "addedAt": null
+    },
+    {
+      "code": "000155",
+      "name": "川能动力",
+      "cost": 14,
+      "qty": 1000,
+      "addedAt": null
     }
   ]
 }
