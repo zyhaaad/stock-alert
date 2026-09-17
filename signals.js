@@ -144,10 +144,14 @@ async function main() {
 
   /* --report：只打印规则胜负统计，不抓数据不写文件 */
   if (report) {
-    const done = (hist.signals || []).filter(s => s.verdict && s.verdict.state !== 'pending')
-    const st = S.winrateStats(hist.signals || [])
-    console.log('规则体检（口径：10 个交易日 ±2%；ruleVersion ' + (hist.ruleVersion || S.RULE_VERSION) + '）')
-    if (!st.length) { console.log('  存档里还没有信号'); return }
+    const all = hist.signals || []
+    // ★ 只统计当前版本：口径变了就不该和旧版本的胜负混在一个胜率里
+    const st = S.winrateStats(all, { onlyVersion: S.RULE_VERSION })
+    const counted = st.reduce((a, s) => a + s.n, 0)
+    const skippedOld = all.length - counted
+    console.log('规则体检（口径：10 个交易日 ±2%；只统计 ruleVersion ' + S.RULE_VERSION +
+      (skippedOld ? '；另有 ' + skippedOld + ' 条更早版本已排除' : '') + '）')
+    if (!st.length) { console.log('  当前版本还没有信号（存档里共 ' + all.length + ' 条，均非 ' + S.RULE_VERSION + '）'); return }
     for (const s of st) {
       console.log('  ' + s.rule.padEnd(16) +
         ' 样本 ' + String(s.n).padStart(3) +
