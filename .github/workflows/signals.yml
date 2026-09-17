@@ -3,10 +3,12 @@ name: signals-daily
 # 每日信号任务（收盘后）：
 #   1. signals.js  —— 持仓/监控的买卖信号（有新信号才推一条，合并成一条消息）
 #   2. screener.js —— 每日备选池（用户要求：**不推送**，只写进备选池记录，控制台可看）
-#   3. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
+#   3. chips.js    —— 透视存档（筹码分布 + 主力/散户成本 + 行为判定 + 站队结论，**不推送**）
+#   4. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
 #
 # 胜负口径（用户 2026-09-16 指定）：信号后 10 个交易日 ±2%。
-# 存档：signals-history.json（信号+胜负）、picks-history.json（备选池）——内容没变不提交。
+# 存档：signals-history.json（信号+胜负）、picks-history.json（备选池）、
+#       chips-history.json（透视；三者内容没变都不提交）。
 #
 # cron 用 UTC：北京 16:05 = UTC 8:05（收盘后日线已定型）
 on:
@@ -42,6 +44,12 @@ jobs:
       - name: Daily picks (archive only, no push)
         run: node screener.js
 
+      # 透视存档（★ 2026-09-17 用户需求）：筹码分布 + 主力/散户成本 + 行为判定 + 站队结论
+      # 放在 screener 之后 —— 这样当天新选出来的备选股也会一起算进去。
+      # 必须放云端的原因：资金流接口在手机浏览器上不保证跨域，且算一次可给所有设备共用。
+      - name: Chip perspective (archive only, no push)
+        run: node chips.js
+
       - name: Weekly rule review (Friday only)
         run: node review.js
         env:
@@ -49,10 +57,10 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
 
-      # 两个存档都是新文件时必须先 git add（git diff 才检测得到），与 fng-history.json 同理
+      # 存档都是新文件时必须先 git add（git diff 才检测得到），与 fng-history.json 同理
       - name: Commit archives
         run: |
-          git add signals-history.json picks-history.json
+          git add signals-history.json picks-history.json chips-history.json
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
