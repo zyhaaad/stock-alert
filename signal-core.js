@@ -49,7 +49,9 @@
 
   var VERSION = 1;
   /* ★ R3（2026-09-17）：MA5_STREAK_EXIT 增加「均线多头排列」前提（MA5>MA10>MA20>MA30）。
-     改规则/参数必须升版本，否则新旧胜率会被混在一起统计（本项目硬约定）。 */
+     改规则/参数必须升版本：判断口径变了，新旧胜负混在一起统计就白改了。
+     ⚠️ 这个"分开统计"不是自动的 —— 调用 winrateStats 时必须显式传 { onlyVersion: RULE_VERSION }，
+     忘了传就等于全量混算（2026-09-17 发现过这个缺口，别再踩）。 */
   var RULE_VERSION = 'R3';
 
   /* ---------------- 参数（集中在这一处，改参数必须同时升 RULE_VERSION） ---------------- */
@@ -366,11 +368,23 @@
     return { state: state, ret: ret, resolveDate: fut.date };
   }
 
-  /** 把一堆已判定信号按规则汇总（供"规则体检"用） */
-  function winrateStats(judged) {
+  /** 把一堆已判定信号按规则汇总（供"规则体检"用）
+   *
+   *  @param judged 已判定（或待判定）的信号数组
+   *  @param opt    { onlyVersion: 'R3' } —— **只统计这个口径版本**的信号，不传则全量。
+   *
+   *  ⚠️ 为什么要按版本隔离：改规则/参数必须升 RULE_VERSION（见文件头），
+   *     升版本就意味着**判断口径变了**。把新旧口径的胜负混进同一个胜率里，
+   *     正好抹掉"改完到底变好没有"这个唯一有价值的结论（R3 就是收窄了 MA5_STREAK_EXIT）。
+   *     注意隔离的后果：刚升版本时当前版本样本是 0，报告会先空一阵——
+   *     这是**如实**的，调用方要把"排除了多少条旧版本"一起打出来，别让报告变成一句空话。 */
+  function winrateStats(judged, opt) {
+    var onlyVer = (opt && opt.onlyVersion) ? String(opt.onlyVersion) : null;
     var by = {};
     var list = judged || [];
     for (var i = 0; i < list.length; i++) {
+      // 版本对不上就跳过（含未标版本的旧数据：宁可不算，也不要算错）
+      if (onlyVer && String(list[i] && list[i].ruleVersion) !== onlyVer) continue;
       var r = list[i].rule || 'UNKNOWN';
       if (!by[r]) by[r] = { rule: r, n: 0, win: 0, lose: 0, flat: 0, pending: 0, retSum: 0 };
       var b = by[r];
