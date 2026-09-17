@@ -7,6 +7,8 @@
  *  每个交易日收盘后跑一次（signals.yml）：
  *   1. 把「我的持仓 holdings[]」和「监控清单 stocks[]」里的代码合并去重
  *   2. 逐只拉 130 根日线（腾讯），用 signal-core.js 跑规则
+ *      · 其中 MA5_STREAK_EXIT（连续 ≥2 天开收盘都站上 5 日线 → 提醒卖出）**只对持仓股发**，
+ *        与持仓页那个「连续 N 天站上 5 日线」标识同一套天数口径（SignalCore.ma5Streak）
  *   3. 新信号写进 signals-history.json（**幂等**：内容没变就不写文件）
  *   4. 顺手把存档里已满 10 个交易日的旧信号判出胜负（回填，供胜率统计）
  *   5. 有新信号才推送一条（没有就不推，避免打扰）
@@ -102,6 +104,34 @@ function onCooldown(bars, hist, code, rule, todayIdx) {
   return false
 }
 
+/* ---------------- 推送文案 ---------------- */
+
+/**
+ * 把当天的新信号拼成**一条**推送消息（分「卖出/离场提醒」与「企稳/介入观察」两栏）。
+ *
+ * 为什么拆成独立函数：推送文案是用户唯一直接看到的东西，不能靠"跑一次肉眼看一眼"就算验过。
+ * 拆出来之后单测可以拿合成 K 线走完「算信号 → 过滤 → 拼文案」整条链路（见 _tests/signals-push-test.js）。
+ *
+ * @param list  当天新信号数组（每项含 name/code/list/side/title/detail）
+ * @param today 北京日期 YYYY-MM-DD（标题里只取 MM-DD）
+ * @returns { title, content }
+ */
+function buildMessage(list, today) {
+  const listName = { holdings: '持仓', monitor: '监控', both: '持仓+监控' }
+  const bySide = { sell: [], buy: [] }
+  for (const s of list) {
+    const line = '· ' + s.name + ' ' + s.code + '（' + (listName[s.list] || s.list) + '）' + s.title +
+      '\n   ' + s.detail
+    if (!bySide[s.side]) bySide[s.side] = []
+    bySide[s.side].push(line)
+  }
+  let content = ''
+  if (bySide.sell.length) content += '【卖出/离场提醒】\n' + bySide.sell.join('\n') + '\n\n'
+  if (bySide.buy.length) content += '【企稳/介入观察】\n' + bySide.buy.join('\n') + '\n\n'
+  content += '信号按「10个交易日后±2%」记录胜负，胜率见控制台-我的持仓。\n非投资建议。'
+  return { title: '持仓信号 ' + String(today).slice(5) + ' · ' + list.length + ' 条', content: content }
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -149,7 +179,11 @@ async function main() {
       const bars = await fetchBars(code)
       if (!bars || bars.length < S.P.trendMa) return { code, bars: null, signals: [], err: 'K线不足' }
       const r = S.evaluate(bars)
-      return { code, bars, signals: (r && r.signals) || [], err: null }
+      /* 按清单类型过滤（口径在 signal-core 的 signalsForList，单一真源）：
+         「连续站上 5 日线 → 提醒卖出」只对持仓股发 —— 用户 2026-09-17 的需求原文是
+         「**持仓股**……连续 2 天及以上都高于 5 日线就提醒卖出」，对没买的票喊卖出没意义。 */
+      const sigs = S.signalsForList((r && r.signals) || [], listOf[code])
+      return { code, bars, signals: sigs, err: null }
     } catch (e) {
       return { code, bars: null, signals: [], err: e && e.message ? e.message : String(e) }
     }
@@ -229,19 +263,8 @@ async function main() {
   if (dry || noPush) { console.log('（--dry/--no-push：不推送）'); return }
   if (!uniq.length) { console.log('没有新信号，不推送'); return }
 
-  const listName = { holdings: '持仓', monitor: '监控', both: '持仓+监控' }
-  const bySide = { sell: [], buy: [] }
-  for (const s of uniq) {
-    const line = '· ' + s.name + ' ' + s.code + '（' + (listName[s.list] || s.list) + '）' + s.title +
-      '\n   ' + s.detail
-    bySide[s.side].push(line)
-  }
-  let content = ''
-  if (bySide.sell.length) content += '【卖出/离场提醒】\n' + bySide.sell.join('\n') + '\n\n'
-  if (bySide.buy.length) content += '【企稳/介入观察】\n' + bySide.buy.join('\n') + '\n\n'
-  content += '信号按「10个交易日后±2%」记录胜负，胜率见控制台-我的持仓。\n非投资建议。'
-
-  const title = '持仓信号 ' + today.slice(5) + ' · ' + uniq.length + ' 条'
+  const msg = buildMessage(uniq, today)
+  const title = msg.title, content = msg.content
   try {
     const r = await push.pushOrThrow(cfg, title, content)
     console.log('已推送（' + r.via + '）')
@@ -256,3 +279,5 @@ if (require.main === module) {
     process.exit(1)
   })
 }
+
+module.exports = { main: main, buildMessage: buildMessage }
