@@ -29,6 +29,7 @@ const SIG_PATH = path.join(SRC, 'signals-history.json')
 const PICKS_PATH = path.join(SRC, 'picks-history.json')
 
 const RULE_NAME = {
+  MA5_STREAK_EXIT: '连续站上5日线（减仓提示）',
   HOT_MA5_BIAS: '短线过热（站上5日线+乖离大）',
   NEAR_PREV_HIGH: '触及前高压力位',
   TREND_BREAK: '跌破20日线',
