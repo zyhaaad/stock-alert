@@ -72,7 +72,12 @@ const S = require('./signal-core.js')
 const SRC = __dirname
 const PICKS_PATH = path.join(SRC, 'picks-history.json')
 const KEEP = 1000            // 最多保留多少条推荐记录
-const PICK_VERSION = 'L1'    // 备选池规则版本（与信号 RULE_VERSION 分开演进）
+const PICK_VERSION = 'L2'    // 备选池规则版本（与信号 RULE_VERSION 分开演进）。
+// L2（2026-09-17）：120 日回测（群体 26 笔 + top-1 口径）三口径一致——
+//   ① 低吸只在「分歧 / 退潮修复」出手（启动·低吸 0/4 -10.5%、发酵·低吸 0/6 全止损、高潮·低吸 17% -3.3%）；
+//   ② 低吸候选昨日连板 ≤2（3 板 0/4、4 板 0/3 全止损，2 板 -0.5% 最优段）；
+//   ③ 低吸分数门槛 50→60（受限群体 60+ 2/2 +25.3%、50-59 1/4 -1.1%）。
+// L1→L2 后 top-1 口径：50%/+10.2% → 67%/+15.2%，接盘 1→0。样本仍小，持续用每日实盘验证。
 
 /* ---------------- 可调参数（改这里 = 改策略，需同步升 PICK_VERSION） ---------------- */
 const P = {
@@ -111,10 +116,11 @@ const P = {
     maxLbcTail: 6,           // ≥6 板且非全场最高板 = 鱼尾剔除
     lateFbt: 143000,         // 尾盘偷袭板
     dipMinPct: -6,           // 分歧低吸：今日跌幅浅于 -6%（深水分歧=负反馈，回测教训）
-    dipMaxPct: 1.5           // 分歧低吸：今日未回封（≤+1.5%）
+    dipMaxPct: 1.5,          // 分歧低吸：今日未回封（≤+1.5%）
+    dipMaxLbc: 2             // 低吸候选昨日连板上限（L2：3 板以上首次分歧=接高位筹码，回测 0/7 全负）
   },
   boardMinScore: 55,         // 打板候选最低分
-  dipMinScore: 50,           // 低吸候选最低分
+  dipMinScore: 60,           // 低吸候选最低分（L2：50→60，受限群体 60+ 显著优于 50-59）
   dipScoreBias: 0,           // 低吸分加成（回测校准用）
   pickCount: 2,
   minAmountLtszHs: 2         // 换手低于 2% 的涨停（非一字的极端缩量）剔除
@@ -721,6 +727,7 @@ async function main() {
     const rej = guardReject({ code: r.code, name: r.name, ltsz: r.ltsz, hs: NaN, zbc: NaN, fbt: 0, lbc: r.lbc, hybk: r.hybk },
       feat, { isMaxBoard: false, wasZbYesterday: false, isDip: true })
     if (rej) { console.log('    ×(低吸) ' + r.name + ' ' + r.code + '：' + rej); continue }
+    if ((r.lbc || 0) > P.guard.dipMaxLbc) { console.log('    ×(低吸) ' + r.name + ' ' + r.code + '：昨日 ' + r.lbc + ' 板超低吸上限 ' + P.guard.dipMaxLbc + '（L2）'); continue }
     const sc = scoreDip(dip, { count: th.count, maxLbc: th.maxLbc }, emo)
     if (!sc) { console.log('    ×(低吸) ' + r.name + ' ' + r.code + '：题材今日无涨停（退潮不接）'); continue }
     const bp = dipBuyPrice(feat)
@@ -732,9 +739,9 @@ async function main() {
   dipCands.sort((a, b) => b.sc.score - a.sc.score)
   console.log('  打板达标（≥' + P.boardMinScore + '）' + boardCands.filter(x => x.sc.score >= P.boardMinScore).length + '、低吸达标（≥' + P.dipMinScore + '）' + dipCands.filter(x => x.sc.score >= P.dipMinScore).length)
 
-  // 策略口子：启动/发酵 = 打板 + 低吸；高潮/分歧 = 只低吸
+  // 策略口子（L2）：打板 = 启动/发酵；低吸 = 只在 分歧 / 退潮修复（回测：启动/发酵/高潮期低吸均为负期望群体）
   const allowBoard = cc.cycle === '启动' || cc.cycle === '发酵'
-  const allowDip = cc.cycle === '启动' || cc.cycle === '发酵' || cc.cycle === '高潮' || cc.cycle === '分歧' || cc.repaired
+  const allowDip = cc.cycle === '分歧' || cc.repaired
   const chosen = []
   if (allowBoard) {
     const b = boardCands.find(x => x.sc.score >= P.boardMinScore)
@@ -774,10 +781,19 @@ async function main() {
       buyPrice: buy,
       reasons: x.sc.reasons,
       plan: {
+        // ★ 操作说明（2026-09-17 用户要求明确化）：本引擎是盘后推荐，进场=次日，卖出=次日起（A股 T+1）。
+        //   先看竞价再决定挂不挂单——「高开/低开放弃」是在竞价阶段否决整单，不是挂单后撤单。
         buy: isBoard
-          ? '次日以涨停价 ' + buy.toFixed(2) + ' 打板；竞价高开 >7% 放弃（追高必接盘）、低开 >3% 放弃（封板质量存疑）；当日若不封板，尾盘冲高无力即走'
-          : '次日回踩 ' + buy.toFixed(2) + ' 附近分批低吸（分歧日低点上方 2% 与 5 日线上方 1% 孰低）；竞价直接高开超 3% 不追，等回踩',
-        sell: '统一止损 -5%；收盘跌破 10 日线无条件走；' + (isBoard ? '次日不封板或封板反复，冲高即兑现' : '反包涨停继续持有，冲高滞涨分批止盈')
+          ? '【盘后推荐·明日进场】① 竞价 9:15-9:25 只看不动：开盘价 ≥' + (buy * 1.07).toFixed(2) + '（涨停价×1.07）→ 高开 >7% 放弃，本单作废；开盘价 ≤' + (buy * 0.97).toFixed(2) + '（涨停价×0.97）→ 低开 >3% 放弃，本单作废；' +
+            '② 开盘价在两者之间 → 也不要开盘就挂单：未涨停时挂涨停价买单会因「价格优先」立即按当前卖一价成交（等于追高买在半山腰）。正确做法是盯盘，等股价快速上攻贴近涨停（卖一价贴到涨停价、涨幅约 9.7% 以上）的瞬间，再以涨停价 ' + buy.toFixed(2) + ' 挂单扫板，封板即成交；' +
+            '③ 股价全天冲不到涨停附近 → 不挂单、不成交，无损失；扫板后若炸板回落 → 已成交，立即按卖出纪律 -5% 止损（炸板是打板的固有风险，仓位自控）；' +
+            '④ 封板成交：当天 T+1 卖不了，持有到次日，按下方卖出纪律操作；不想盯盘就直接放弃打板单，只做低吸单（低吸限价单可挂等回踩，无需盯盘）'
+          : '【盘后推荐·明日进场】① 竞价 9:15-9:25 只看不动：开盘价 ≥' + (buy * 1.03).toFixed(2) + '（买入价×1.03）→ 高开超 3% 不追，本单作废；' +
+            '② 开盘价没超 → 以买入价 ' + buy.toFixed(2) + ' 挂限价单（限价低于现价不会立即成交，会一直等着，低吸=等分歧回踩送筹码，绝不追价）；' +
+            '③ 当天没回踩到 ' + buy.toFixed(2) + ' → 单子不会成交，收盘前撤单即可，无损失；' +
+            '④ 若成交：当天 T+1 卖不了，持有到次日，按下方卖出纪律操作',
+        sell: '成交日 T+1 不可卖，次日起执行：统一止损 -5%（跌破 ' + (buy * 0.95).toFixed(2) + ' 当日走）；收盘跌破 10 日线无条件走；' +
+          (isBoard ? '次日不封板或封板反复，冲高即兑现' : '反包涨停继续持有，冲高滞涨分批止盈')
       },
       ruleVersion: PICK_VERSION,
       verdict: null
@@ -790,12 +806,59 @@ async function main() {
     for (const r of f.reasons) console.log('     · ' + r)
   }
 
+  /* 弱转强观察池（2026-09-18）：盘后筛「今日炸板 + 题材未死 + 位置健康」。
+     只是观察池——不计入正式推荐、不参与胜负统计；转强确认在次日竞价（盘后确认不了），
+     用户按 confirm 文案盘中自行执行。 */
+  const weakPool = []
+  if (poolOk && cc.cycle !== '冰点' && cc.cycle !== '高潮') {
+    const zbTodayRows = pools.zb[emo.date] || []
+    const weakBase = []
+    for (const r of zbTodayRows) {
+      if (!r.code) continue
+      const thw = thToday[r.hybk || '未知'] || { count: 0, maxLbc: 0 }
+      if (thw.count < 2) continue                                   // 题材今日仍 ≥2 家涨停（题材未死）
+      if (isFinite(r.ltsz) && (r.ltsz < P.guard.minLtsz || r.ltsz > P.guard.maxLtsz)) continue
+      if (isFinite(r.hs) && r.hs > P.guard.maxHs) continue
+      weakBase.push(r)
+    }
+    const weakBars = {}
+    let wNext = 0
+    async function wWorker() {
+      while (wNext < weakBase.length) {
+        const c = weakBase[wNext++].code
+        try { weakBars[c] = await fetchBars(c) } catch (e) { weakBars[c] = null }
+      }
+    }
+    await Promise.all(new Array(Math.min(5, weakBase.length)).fill(0).map(wWorker))
+    const wScored = []
+    for (const r of weakBase) {
+      const bars = weakBars[r.code]
+      if (!bars) continue
+      const feat = analyzeBars(r.code, bars, true)
+      if (!feat.ok) continue
+      const pct = feat.close / feat.prevClose - 1
+      if (pct < -0.07) continue                                     // 收太深 = 大面，不是弱转强素材
+      if (isFinite(feat.gain20) && feat.gain20 > 0.6) continue      // 高位炸板风险大
+      wScored.push({ r, pct, gain20: isFinite(feat.gain20) ? feat.gain20 : 0, thCount: (thToday[r.hybk || '未知'] || { count: 0 }).count })
+    }
+    wScored.sort((a, b) => b.thCount - a.thCount || a.gain20 - b.gain20)
+    for (const c of wScored.slice(0, 3)) {
+      weakPool.push({
+        code: c.r.code, name: c.r.name, industry: c.r.hybk || '未知',
+        why: '今日炸板（收盘 ' + (c.pct * 100).toFixed(1) + '%）、题材「' + (c.r.hybk || '未知') + '」今日仍 ' + c.thCount + ' 家涨停、20 日涨幅 ' + Math.round(c.gain20 * 100) + '%（位置健康）',
+        confirm: '明日竞价确认：高开 2%-5% 且竞价放量 → 转强，轻仓试探，开盘 5 分钟不破竞价低点再确认；低开 / 平开 / 高开 >7% 一律放弃（弱转弱不接）。成交后 T+1，次日起按 -5% 止损执行。'
+      })
+    }
+    if (weakPool.length) console.log('  弱转强观察池 ' + weakPool.length + ' 只（不计入推荐，次日竞价确认）')
+  }
+
   /* 写存档（幂等：内容没变就不写） */
   const ids = new Set((picks.picks || []).map(p => p.id))
   let added = 0
   for (const f of fresh) if (!ids.has(f.id)) { picks.picks.push(f); added++ }
   if (picks.picks.length > KEEP) picks.picks = picks.picks.slice(picks.picks.length - KEEP)
   picks.ruleVersion = PICK_VERSION
+  picks.weakPool = { date: today, rows: weakPool }
 
   if (!dry) {
     const prevText = fs.existsSync(PICKS_PATH) ? fs.readFileSync(PICKS_PATH, 'utf8') : ''
