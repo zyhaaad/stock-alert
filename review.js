@@ -15,7 +15,8 @@
  *
  *  用户已选定胜负口径：10 个交易日后 ±2%（signal-core.js 里的 P.winDays/winBand）。
  *
- *  本地调试：node review.js            （非周五会提示跳过；--force 可强制跑）
+ *  本地调试：node review.js --force --dry   （非周五会提示跳过；--force 强制跑、--dry 不推送）
+ *            ⚠️ 不加 --dry 时本地跑会**真的发一条推送**给自己（验证文案时别踩）。
  * ============================================================
  */
 
@@ -72,6 +73,9 @@ function fmtPct(v) {
 
 async function main() {
   const force = process.argv.includes('--force')
+  /* 与 signals.js / screener.js 统一：--dry / --no-push 只打印不推送。
+     没有这个开关时根本没法验证推送文案（一跑就真发一条），别省。 */
+  const noPush = process.argv.includes('--dry') || process.argv.includes('--no-push')
   if (!force && !isFriday()) {
     console.log('今天不是周五，规则体检每周五跑一次（--force 可强制）')
     return
@@ -84,16 +88,27 @@ async function main() {
     return
   }
 
-  /* 备选池的记录转成 winrateStats 认识的形状 */
-  const pickRows = picks.map(p => ({ rule: 'PICK', verdict: p.verdict || { state: 'pending', ret: NaN } }))
-  const stats = S.winrateStats(sigs.concat(pickRows))
+  /* 备选池的记录转成 winrateStats 认识的形状（★ 要带上逐条的 ruleVersion，
+     否则下面的按版本隔离会把它们全部排除掉） */
+  const pickRows = picks.map(p => ({ rule: 'PICK', ruleVersion: p.ruleVersion, verdict: p.verdict || { state: 'pending', ret: NaN } }))
+  const allRows = sigs.concat(pickRows)
+  const stats = S.winrateStats(allRows, { onlyVersion: S.RULE_VERSION })
+  /* 被隔离掉的旧版本条数 —— 报告里必须说出来，否则"样本 0"看起来像坏了 */
+  const counted = stats.reduce((a, s) => a + s.n, 0)
+  const skippedOld = allRows.length - counted
 
   const bj = new Date(Date.now() + (8 * 60 + new Date().getTimezoneOffset()) * 60000)
   const today = bj.toISOString().slice(0, 10)
   const pending = stats.reduce((a, s) => a + s.pending, 0)
 
   let content = '胜负口径：10 个交易日后 ±2%。规则版本 ' + S.RULE_VERSION +
-    '。共 ' + stats.length + ' 条规则，待判定 ' + pending + ' 条。\n\n'
+    '（只统计该版本，新旧口径不混算）。共 ' + stats.length + ' 条规则，待判定 ' + pending + ' 条。\n'
+  content += skippedOld
+    ? '另有 ' + skippedOld + ' 条更早版本（R2 及以前）的信号已排除，不计入胜率 —— 刚升版本时样本会先少一阵，这是正常的。\n\n'
+    : '\n'
+  if (!stats.length) {
+    content += '当前版本（' + S.RULE_VERSION + '）还没有信号入库，本期没有可统计的规则。\n'
+  }
 
   for (const s of stats) {
     content += '· ' + (RULE_NAME[s.rule] || s.rule) +
@@ -111,6 +126,8 @@ async function main() {
 
   console.log('==== 规则体检 ' + today + ' ====')
   console.log(content)
+
+  if (noPush) { console.log('（--dry/--no-push：不推送）'); return }
 
   const cfg = JSON.parse(fs.readFileSync(path.join(SRC, 'config.json'), 'utf8'))
   try {
