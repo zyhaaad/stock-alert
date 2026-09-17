@@ -83,6 +83,13 @@
       "cost": 30,
       "qty": 1000,
       "addedAt": null
+    },
+    {
+      "code": "000767",
+      "name": "晋控电力",
+      "cost": 5,
+      "qty": 1000,
+      "addedAt": null
     }
   ]
 }
