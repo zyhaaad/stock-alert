@@ -232,10 +232,13 @@ async function fetchBars(code) {
   return raw ? S.normBars(raw) : null
 }
 
-/** 交易日历：用指数（中证全指）最近日期推导，避免节假日把「0 涨停」误判成情绪冰点 */
+/** 交易日历：用指数（中证全指）最近日期推导，避免节假日把「0 涨停」误判成情绪冰点
+ *  ⚠️ 2026-09-19 修 bug：URL 是 param=code,day,起,止,根数,qfq 五段，中间起止两个空位
+ *     必须三个逗号（day,,,17）。之前写成 day,,17 → gtimg 返回 param error，
+ *     fetchTradingDates 静默返回 null，情绪周期在生产上一直拿不到日历。 */
 async function fetchTradingDates(n) {
   try {
-    const j = await getJson('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,' + (n + 10) + ',qfq')
+    const j = await getJson('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,,' + (n + 10) + ',qfq')
     const key = j.data && Object.keys(j.data)[0]
     const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
     if (!raw) return null
@@ -893,10 +896,13 @@ async function fetchUniverse() {
   return out
 }
 
-/* ---------------- 导出（回测工具 _tests/leader-backtest.js 复用引擎） ---------------- */
+/* ---------------- 导出（回测工具 _tests/leader-backtest.js 复用引擎） ----------------
+ * 2026-09-19 追加导出 getJson/fetchPool/fetchTradingDates/fetchBars/fetchQuotes：
+ * 供 style.js（大盘风格驾驶舱）复用同一套数据管道，纯增量、不改任何逻辑。 */
 module.exports = {
   P, PICK_VERSION, limitPrice, isLimitUpBar, analyzeBars,
-  emotionOfDay, classifyCycle, guardReject, scoreBoard, scoreDip, dipBuyPrice, themeStats
+  emotionOfDay, classifyCycle, guardReject, scoreBoard, scoreDip, dipBuyPrice, themeStats,
+  getJson, fetchPool, fetchTradingDates, fetchBars, fetchQuotes
 }
 
 if (require.main === module) {
