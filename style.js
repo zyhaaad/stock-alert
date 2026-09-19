@@ -610,9 +610,13 @@ async function main() {
     } catch (e) { notes.push('优选停算：' + e.message); pickNote = '优选停算：' + e.message }
   }
 
-  /* 写存档 */
+  /* 写存档
+   * ⚠️ date = **数据对应的交易日**（收盘日，如 09-18），不是脚本运行日（09-19 周六补跑）。
+   *    generatedAt 才是运行时间；控制台显示「X 收盘更新」用的是 date。 */
+  const dataDate = (emo && emo.date) || today
   const snap = {
-    date: today,
+    date: dataDate,
+    generatedAt: today,
     styleVersion: STYLE_VERSION,
     style: { id: style.id, name: style.name, why: style.why, guide: style.guide },
     cycle: cycle ? { cycle: cycle.cycle, why: cycle.why, repaired: !!cycle.repaired } : null,
@@ -630,7 +634,7 @@ async function main() {
     const h = loadHistory()
     h.v = STYLE_VERSION
     h.updated = new Date().toISOString()
-    h.days = h.days.filter(d => d.date !== today)
+    h.days = h.days.filter(d => d.date !== dataDate)   /* 同一交易日重跑只保留最新一份 */
     h.days.push(snap)
     h.days = h.days.slice(-KEEP_DAYS)
     fs.writeFileSync(STYLE_PATH, JSON.stringify(h), 'utf8')
@@ -641,9 +645,10 @@ async function main() {
   if (notes.length) console.log('缺源备注：' + notes.join('；'))
 }
 
+/* 北京时间日期（本机时区无关）：传参则按参数取，否则取当前 UTC+8 日期 */
 function bjDate(d) {
-  const t = d ? new Date(d) : new Date(Date.now() + (8 - 0) * 3600e3 + new Date().getTimezoneOffset() * 60e3)
-  return new Date(Date.now() + 8 * 3600e3 + new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 10)
+  const ms = d ? new Date(d).getTime() : Date.now() + 8 * 3600e3
+  return new Date(ms).toISOString().slice(0, 10)
 }
 
 module.exports = {
