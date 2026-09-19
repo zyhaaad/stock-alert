@@ -4,11 +4,12 @@ name: signals-daily
 #   1. signals.js  —— 持仓/监控的买卖信号（有新信号才推一条，合并成一条消息）
 #   2. screener.js —— 每日备选池（用户要求：**不推送**，只写进备选池记录，控制台可看）
 #   3. chips.js    —— 透视存档（筹码分布 + 主力/散户成本 + 行为判定 + 站队结论，**不推送**）
-#   4. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
+#   4. style.js    —— 大盘风格驾驶舱（S1：风格判定 + 每日优选 ≤3 只，**不推送**，2026-09-19）
+#   5. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
 #
 # 胜负口径（用户 2026-09-16 指定）：信号后 10 个交易日 ±2%。
 # 存档：signals-history.json（信号+胜负）、picks-history.json（备选池）、
-#       chips-history.json（透视；三者内容没变都不提交）。
+#       chips-history.json（透视）、style-history.json（风格；内容没变都不提交）。
 #
 # cron 用 UTC：北京 16:05 = UTC 8:05（收盘后日线已定型）
 on:
@@ -49,6 +50,10 @@ jobs:
       # 必须放云端的原因：资金流接口在手机浏览器上不保证跨域，且算一次可给所有设备共用。
       - name: Chip perspective (archive only, no push)
         run: node chips.js
+
+      # 大盘风格驾驶舱（★ 2026-09-19 用户需求）：风格判定 + 每日优选 ≤3 只（不推送）
+      - name: Market style dashboard (archive only, no push)
+        run: node style.js
 
       - name: Weekly rule review (Friday only)
         run: node review.js
