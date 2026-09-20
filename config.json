@@ -52,6 +52,14 @@
       "target": 81.5,
       "enabled": true,
       "addedAt": "2026-09-17"
+    },
+    {
+      "code": "002456",
+      "name": "欧菲光",
+      "condition": "lte",
+      "target": 5.5,
+      "enabled": true,
+      "addedAt": "2026-09-20"
     }
   ],
   "deleted": [],
