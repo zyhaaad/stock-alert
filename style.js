@@ -57,6 +57,15 @@
  *  本地调试：
  *    node style.js --dry        # 只算不写
  *    node style.js --report     # 打印最近风格快照
+ *    node style.js --wait=8     # 等当日数据定型（最多 8 分钟）后再算，收盘即跑用
+ *
+ *  ---------------- 2026-09-21：收盘后立即更新 ----------------
+ *  原来挂在 signals.yml 第 4 步（北京 16:05），且排在 screener/chips 之后 ——
+ *  上游任一失败整条 job 就断，风格当天根本不更新。现独立为 style.yml：
+ *    北京 15:05 快版（--wait=12，等腾讯当日日K + 东财涨停池当日数据到位）
+ *    北京 15:40 定稿版（资金流数据此时已完整，覆盖同一交易日，见下方「同一交易日重跑」）
+ *  同一交易日重跑只保留最新一份（h.days 去重 date），所以早晚两版不会重复堆积。
+ *  15:30 前生成的快照标记 draft=true（快版），缺源如实写进 notes，不做任何乐观填充。
  * ============================================================
  */
 
@@ -453,6 +462,68 @@ function loadHistory() {
   return { v: STYLE_VERSION, updated: '', days: [] }
 }
 
+/* ---------------- 收盘后「数据就绪」等待（2026-09-21 新增） ---------------- */
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+/** 给任意 promise 套硬超时：数据来源卡住时不能拖死整个 workflow */
+function withTimeout(p, ms, fallback) {
+  return new Promise(resolve => {
+    let done = false
+    const t = setTimeout(() => { if (!done) { done = true; resolve(fallback) } }, ms)
+    Promise.resolve(p).then(v => { if (!done) { done = true; clearTimeout(t); resolve(v) } })
+      .catch(() => { if (!done) { done = true; clearTimeout(t); resolve(fallback) } })
+  })
+}
+
+/** 北京时间当天的分钟数（0~1439），与本机时区无关 */
+function bjMinutes(d) {
+  const ms = d ? new Date(d).getTime() : Date.now()
+  const t = new Date(ms + 8 * 3600e3)
+  return t.getUTCHours() * 60 + t.getUTCMinutes()
+}
+
+/** 周六/周日肯定不开市（法定节假日靠下面的日K兜底判断） */
+function isWeekend(dateStr) {
+  const w = new Date(dateStr + 'T00:00:00Z').getUTCDay()
+  return w === 0 || w === 6
+}
+
+/**
+ * 等「今天」的交易数据真正定型再开工。
+ * 就绪判据（两条都要满足，缺一不可）：
+ *   ① 腾讯中证全指当日日K已出  → 说明今天确实是交易日且已收盘
+ *   ② 东财涨停池当日返回非空    → 说明情绪侧数据已落库（否则 style/picks 全是空的）
+ * 超时不报错、不 exit 1 —— 拿现有数据照常跑，缺源如实记进 notes。
+ *
+ * @returns {{dates:string[]|null, ready:boolean, waitedMin:number}}
+ */
+async function waitReady(today, waitMinutes) {
+  const maxMin = Math.max(0, Math.min(30, Number(waitMinutes) || 0))
+  if (!maxMin) return { dates: null, ready: true, waitedMin: 0 }   /* 不等：按就绪直接开工 */
+  const t0 = Date.now()
+  const deadline = t0 + maxMin * 60000
+  let dates = null
+  for (let i = 1; ; i++) {
+    let ok = false
+    try {
+      const d = await withTimeout(SC.fetchTradingDates(7), 20000, null)
+      if (d && d.length) dates = d
+      if (d && d.length && d[d.length - 1] === today) {
+        const pool = await withTimeout(SC.fetchPool('zt', today), 20000, [])
+        ok = Array.isArray(pool) && pool.length > 0
+      }
+    } catch (e) { ok = false }
+    if (ok) return { dates, ready: true, waitedMin: Math.round((Date.now() - t0) / 60000) }
+    const rest = deadline - Date.now()
+    if (rest <= 0) break
+    console.log('  ⏳ ' + today + ' 当日数据尚未定型（第 ' + i + ' 次探测），' +
+      Math.round(rest / 1000) + 's 后重试…')
+    await sleep(Math.min(60000, rest))
+  }
+  return { dates, ready: false, waitedMin: Math.round((Date.now() - t0) / 60000) }
+}
+
 /* ---------------- 主流程 ---------------- */
 
 async function main() {
@@ -460,12 +531,36 @@ async function main() {
   const report = process.argv.includes('--report')
   const today = bjDate()
 
+  /* 周末直接收工：不等日K，省下 Actions 时长，也避免给非交易日留下垃圾快照 */
+  if (isWeekend(today) && !report) {
+    console.log(today + ' 是周末，非交易日 —— 跳过（不写存档）')
+    return
+  }
+
   if (report) {
     const h = loadHistory()
     for (const d of h.days.slice(-10)) {
       console.log(d.date + ' [' + (d.style ? d.style.name : '?') + '] 优选 ' +
         (d.picks ? d.picks.length : 0) + ' 只' + (d.picks && d.picks.length ? '：' + d.picks.map(p => p.name).join('、') : ''))
     }
+    return
+  }
+
+  /* 收盘即跑：等当日日K + 涨停池双双到位（15:05 那次靠它顶住数据源延迟） */
+  const waitMinArg = (process.argv.find(a => a.indexOf('--wait=') === 0) || '').split('=')[1]
+  let ready = true, waitedMin = 0, datesCache = null
+  if (waitMinArg && !dry) {
+    const w = await waitReady(today, waitMinArg)
+    datesCache = w.dates
+    ready = w.ready
+    waitedMin = w.waitedMin
+    if (ready) console.log('✅ ' + today + ' 当日数据已就绪（等待 ' + waitedMin + ' 分钟）')
+  }
+
+  /* 等满了还没等到今天的数据 —— 基本可以断定今天不开市（法定节假日），
+     直接收工而不是拿昨天的日K硬算成"今天"，否则驾驶舱会显示一条过期的假快照。 */
+  if (waitMinArg && !dry && !ready) {
+    console.log(today + ' 当日交易数据始终未定型 —— 判定为非交易日，跳过（不写存档）')
     return
   }
 
@@ -484,7 +579,7 @@ async function main() {
   console.log('== 段2：情绪周期（复用涨停池管道） ==')
   let cycle = null, emo = null, themes = { leadSeq: [], leadTheme: '', leadDays: 0, themesToday: [] }
   try {
-    const dates = await SC.fetchTradingDates(7)
+    const dates = datesCache || await SC.fetchTradingDates(7)   /* --wait 已取过就复用，少一次请求 */
     if (!dates || !dates.length) throw new Error('交易日历不可得')
     const pools = { zt: {}, zb: {}, dt: {} }
     for (const d of dates) {
@@ -500,10 +595,14 @@ async function main() {
       ' 板｜主线：' + themes.leadSeq.join(' → '))
   } catch (e) { notes.push('涨停池数据缺：' + e.message) }
 
-  let fng = NaN
+  let fng = NaN, fngDate = ''
   try {
     const f = JSON.parse(fs.readFileSync(path.join(SRC, 'fng-history.json'), 'utf8'))
-    if (Array.isArray(f.days) && f.days.length) fng = Number(f.days[f.days.length - 1][1])
+    if (Array.isArray(f.days) && f.days.length) {
+      const tail = f.days[f.days.length - 1]
+      fng = Number(tail[1])
+      fngDate = String(tail[0] || '')
+    }
   } catch (e) { notes.push('恐贪存档不可得') }
 
   const style = classifyStyle({ cycle, emo, fng, idx, themes })
@@ -614,13 +713,21 @@ async function main() {
    * ⚠️ date = **数据对应的交易日**（收盘日，如 09-18），不是脚本运行日（09-19 周六补跑）。
    *    generatedAt 才是运行时间；控制台显示「X 收盘更新」用的是 date。 */
   const dataDate = (emo && emo.date) || today
+  /* 15:30 前算出来的算「快版」：此时东财板块/个股资金流可能还没结算完，
+     15:40 的定稿版会按同一 date 覆盖它。如实标注，不让用户误以为是终值。 */
+  const isDraft = bjMinutes() < 15 * 60 + 30
   const snap = {
     date: dataDate,
     generatedAt: today,
+    draft: isDraft,
     styleVersion: STYLE_VERSION,
     style: { id: style.id, name: style.name, why: style.why, guide: style.guide },
     cycle: cycle ? { cycle: cycle.cycle, why: cycle.why, repaired: !!cycle.repaired } : null,
     fng: isFinite(fng) ? fng : null,
+    /* ⚠️ fng.js 每天 16:05 才写当天定稿值，而驾驶舱 15:05 就跑 ——
+       这时拿到的是**昨天**的恐贪，必须把它的日期一起存下来，
+       否则界面上会把昨天的温度当成今天的读数。 */
+    fngDate: fngDate || null,
     emo: emo ? { zt: emo.zt, dt: emo.dt, zb: emo.zb, zbRate: Number(emo.zbRate.toFixed(3)), maxLbc: emo.maxLbc, twoPlus: emo.twoPlus, prem: isFinite(emo.prem) ? Number(emo.prem.toFixed(4)) : null } : null,
     idx: { dir: idx.dir, gap: isFinite(idx.gap) ? Number((idx.gap * 100).toFixed(2)) : null, ret20Large: isFinite(idx.ret20Large) ? Number((idx.ret20Large * 100).toFixed(2)) : null, ret20Small: isFinite(idx.ret20Small) ? Number((idx.ret20Small * 100).toFixed(2)) : null },
     themes: themes.themesToday,
@@ -629,6 +736,7 @@ async function main() {
     picks, pickNote,
     notes
   }
+  if (isDraft && !dry) notes.push('收盘快版：板块/个股资金流可能尚未结算完，15:40 定稿版会覆盖本条')
 
   if (!dry) {
     const h = loadHistory()
@@ -653,7 +761,8 @@ function bjDate(d) {
 
 module.exports = {
   C, IDX, STYLE_VERSION, psRow, psGate, idxStyle, themeLeaders, classifyStyle,
-  scoreCandidate, guardCandidate, passFlow, loadHistory
+  scoreCandidate, guardCandidate, passFlow, loadHistory,
+  bjDate, bjMinutes, isWeekend, waitReady        // 2026-09-21：收盘即跑的就绪判断单独可测
 }
 
 if (require.main === module) {
