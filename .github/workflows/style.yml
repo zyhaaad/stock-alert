@@ -1,0 +1,58 @@
+name: style-daily
+
+# 大盘风格驾驶舱（S1）：每个交易日跑两次，生成 style-history.json 的最新一天快照。
+#
+# 为什么独立成一个 workflow（2026-09-21 用户需求：收盘后要立刻更新）：
+#   原来挂在 signals.yml 的第 4 步 —— ① 时间锁死在北京 16:05，距收盘 1 小时；
+#   ② 排在 screener.js / chips.js 之后，上游任一失败整条 job 就断，风格当天根本不更新；
+#   ③ 任何一个 step 失败都会连累存档提交。现在它自己跑、自己提交，互不影响。
+#
+# 两次运行的分工（同一交易日重跑只保留最新一份，不会堆积）：
+#   15:05（北京）—— 收盘即跑，带 --wait=8：等腾讯当日日K + 东财涨停池当天数据到位再算，
+#                    最快 15:05、最迟 15:13 出结果 → 标记为「快版 draft」
+#   15:40（北京）—— 定稿：东财板块/个股资金流此时已结算完，优选结果更准 → 覆盖同一条日期
+#
+# cron 用 UTC：北京 15:05 = UTC 7:05；北京 15:40 = UTC 7:40
+# ⚠️ GitHub 定时任务本身可能延迟，所以第一个 cron 提前到 15:05，配合脚本内的等待逻辑兜底。
+on:
+  schedule:
+    - cron: '5 7 * * 1-5'
+    - cron: '40 7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: style-daily
+  cancel-in-progress: false
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    # 20 分钟足够：等待最多 8 分钟 + 算风格 + 精筛候选（style.js 内部对每次抓取都有 20s 硬超时）
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Market style dashboard
+        run: node style.js --wait=8
+
+      # style-history.json 是全新文件时不 git add，git diff 检测不到；
+      # 内容没变化（比如非交易日跳过了）就不提交，避免刷屏空 commit。
+      - name: Commit style archive
+        run: |
+          git add style-history.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update market style dashboard [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "存档无变化"
+          fi
