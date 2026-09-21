@@ -212,14 +212,18 @@
    *  为什么必须分开：这两件事本来就是两批。
    *    · 持有一只股票，但不需要价格提醒（长期拿着，不想被吵）
    *    · 监控一只股票，但还没买（在等买点）
-   *  所以成本价/股数**不写在 stocks[] 上**，而是存在配置的 holdings[] 里：
+   *  所以持仓**不写在 stocks[] 上**，而是存在配置的 holdings[] 里：
    *    holdings: [{ code, name, cost, qty, addedAt }]
    *  同一个代码可以同时出现在两个列表里（既监控又持有），这是最常见的情况。
+   *
+   *  ⚠️ 2026-09-20 规格变更（用户拍板）：**持仓只记「持有哪一只」**，不再记成本/股数。
+   *     cost/qty 保留仅为兼容老数据 —— 缺失或为 0 **不再视为无效记录**。
+   *     由此浮盈 / 持仓市值 / 成本合计这些「账」在界面上整体撤下（没有基准就不算账）。
    * ============================================================ */
 
   /**
    * 规范化一条持仓记录。
-   * @returns null 表示这条无效（代码不是 6 位数字，或成本/股数没填全）——
+   * @returns null 表示这条无效（代码不是 6 位数字）——
    *          **绝不因为一条脏数据让整页算错**，所以无效记录一律被丢弃。
    */
   function normHolding(h) {
@@ -227,12 +231,11 @@
     var code = (h.code === null || h.code === undefined) ? '' : String(h.code).trim();
     if (!/^\d{6}$/.test(code)) return null;
     var cost = num(h.cost), qty = num(h.qty);
-    if (!(cost > 0) || !(qty > 0)) return null;
     return {
       code: code,
       name: h.name ? String(h.name) : code,
-      cost: cost,
-      qty: qty,
+      cost: cost > 0 ? cost : 0,
+      qty: qty > 0 ? qty : 0,
       addedAt: h.addedAt || null
     };
   }
