@@ -4,12 +4,15 @@ name: signals-daily
 #   1. signals.js  —— 持仓/监控的买卖信号（有新信号才推一条，合并成一条消息）
 #   2. screener.js —— 每日备选池（用户要求：**不推送**，只写进备选池记录，控制台可看）
 #   3. chips.js    —— 透视存档（筹码分布 + 主力/散户成本 + 行为判定 + 站队结论，**不推送**）
-#   4. style.js    —— 大盘风格驾驶舱（S1：风格判定 + 每日优选 ≤3 只，**不推送**，2026-09-19）
-#   5. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
+#   4. review.js   —— 每周五的规则体检（各规则胜率/样本数/调整建议；非周五自动跳过）
+#
+#   ⚠️ style.js（大盘风格驾驶舱）已于 2026-09-21 迁出到独立的 style.yml，
+#      不再挂在这里：一是这里 16:05 才跑、太晚；二是它会挡在本 workflow 的
+#      存档提交前面，上游失败会导致风格当天不更新。
 #
 # 胜负口径（用户 2026-09-16 指定）：信号后 10 个交易日 ±2%。
 # 存档：signals-history.json（信号+胜负）、picks-history.json（备选池）、
-#       chips-history.json（透视）、style-history.json（风格；内容没变都不提交）。
+#       chips-history.json（透视）。style-history.json（风格）归 style.yml 提交。
 #
 # cron 用 UTC：北京 16:05 = UTC 8:05（收盘后日线已定型）
 on:
@@ -51,9 +54,8 @@ jobs:
       - name: Chip perspective (archive only, no push)
         run: node chips.js
 
-      # 大盘风格驾驶舱（★ 2026-09-19 用户需求）：风格判定 + 每日优选 ≤3 只（不推送）
-      - name: Market style dashboard (archive only, no push)
-        run: node style.js
+      # 大盘风格驾驶舱已于 2026-09-21 迁到独立 workflow style.yml（收盘即跑 15:05 + 定稿 15:40），
+      # 这里不要再跑一遍 —— 同一天两处写 style-history.json 会互相覆盖。
 
       - name: Weekly rule review (Friday only)
         run: node review.js
@@ -65,7 +67,7 @@ jobs:
       # 存档都是新文件时必须先 git add（git diff 才检测得到），与 fng-history.json 同理
       - name: Commit archives
         run: |
-          git add signals-history.json picks-history.json chips-history.json style-history.json
+          git add signals-history.json picks-history.json chips-history.json
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
