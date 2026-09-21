@@ -140,6 +140,13 @@
       "cost": 0,
       "qty": 0,
       "addedAt": null
+    },
+    {
+      "code": "000876",
+      "name": "新希望",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
     }
   ]
 }
