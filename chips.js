@@ -43,6 +43,7 @@ const PICKS_PATH = path.join(SRC, 'picks-history.json')
 const BARS_N = 500           // 日线根数：两年足够让筹码分布收敛（低换手股尤其需要长历史）
 const FLOW_N = 120           // 资金流天数：半年，够看一波完整的建仓/派发
 const CHIP_KEEP = 200        // 存档最多保留多少只（防止无限膨胀）
+const HOLDER_KEEP = 12       // 股东户数最多保留多少期（季报口径，12 期≈3 年，够看趋势）
 
 /* ---------------- 基础工具 ---------------- */
 
@@ -99,6 +100,47 @@ async function fetchBars(code) {
   const key = j && j.data && Object.keys(j.data)[0]
   const raw = j && j.data && j.data[key] && (j.data[key].qfqday || j.data[key].day)
   return raw ? S.normBars(raw) : null
+}
+
+/**
+ * 股东户数（人数）多期历史 —— 2026-09-22 新增，供控制台「股东人数变化趋势图」用。
+ *
+ * 数据源：东财 F10 股东研究 `emweb.securities.eastmoney.com/PC_HSF10/ShareholderResearch/PageAjax`
+ *   · 只有这一家给**多期**（gdrs 数组，通常 8~12 期），datacenter 的
+ *     RPT_HOLDERNUMLATEST 只回最新一期，画不出趋势（_tests/_cache/holder-probe.js 实测）。
+ *   · ⚠️ 该接口**没有 CORS 头、也不支持 JSONP**（实测），所以浏览器拿不到 —— 必须云端抓。
+ *     （顺带印证：凡是想在控制台直接拉东财 F10 的，都会撞跨域，别再试。）
+ *
+ * 口径：季报/半年报口径，一期一个点；TOTAL_NUM_RATIO 是**较上期环比 %**（已是百分比数值，不再 ×100）。
+ * 失败返回 null —— 股东人数是"有则更好"的补充维度，缺了不影响筹码/资金结论。
+ */
+async function fetchHolders(code) {
+  const c = String(code)
+  if (!/^(60|00|30)/.test(c)) return null
+  const mkt = c[0] === '6' ? 'SH' : 'SZ'
+  try {
+    const url = 'https://emweb.securities.eastmoney.com/PC_HSF10/ShareholderResearch/PageAjax?code=' + mkt + c
+    const j = await fetchJson(url, 12000)
+    const arr = (j && j.gdrs) || []
+    if (!arr.length) return null
+    const rows = normHolders(arr)
+    return rows.length ? rows : null
+  } catch (e) { return null }
+}
+
+/** 纯函数：东财 F10 gdrs[] → 升序、截断到最近 HOLDER_KEEP 期的股东人数序列（可单测、不联网） */
+function normHolders(arr) {
+  if (!Array.isArray(arr)) return []
+  const rows = arr.map(function (d) {
+    return {
+      date: String((d && d.END_DATE) || '').slice(0, 10),
+      num: Number(d && d.HOLDER_TOTAL_NUM) || 0,
+      ratio: isFinite(Number(d && d.TOTAL_NUM_RATIO)) ? Math.round(Number(d.TOTAL_NUM_RATIO) * 100) / 100 : null,
+      focus: String((d && d.HOLD_FOCUS) || '')
+    }
+  }).filter(function (r) { return r.date && r.num > 0 })
+  rows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0 })
+  return rows.slice(-HOLDER_KEEP)
 }
 
 /**
@@ -177,7 +219,7 @@ function loadHist() {
 }
 
 /** 把 analyze 的结果压成存档用的紧凑结构（只留界面要用的字段，控制文件体积） */
-function compact(code, name, r, flowSrc) {
+function compact(code, name, r, flowSrc, holders) {
   const c = r.chips, f = r.flows, v = r.vol
   return {
     code: code,
@@ -212,6 +254,10 @@ function compact(code, name, r, flowSrc) {
     main: r.mainBehavior,
     retail: r.retailBehavior,
     stance: r.stance,
+    /* 股东人数多期（2026-09-22 新增）：[{date, num, ratio(较上期%), focus}]
+       ⚠️ 季度口径、且要等公司披露才会更新，界面必须标出日期，不能让人以为是今天的数。
+       取不到就是 null（F10 无 CORS，只能云端抓；抓不到如实留空，界面不画）。 */
+    holders: (holders && holders.length) ? holders : null,
     ma5: (function () {
       const st = S.ma5Streak(r.barsObj || [])
       return { days: st.days, sig: st.sig, ma5: round2(st.ma5) }
@@ -263,6 +309,7 @@ async function main() {
     const ff = await fetchFlows(code)
     const sh = await fetchShares(code)
     const floatShares = sh && isFinite(sh.floatShares) ? sh.floatShares : NaN
+    const hd = await fetchHolders(code)      /* 股东人数（季度口径，缺了不影响其它结论） */
     const r = C.analyze({
       code: code,
       name: nameOf[code],
@@ -273,7 +320,7 @@ async function main() {
     })
     if (!r.ok) return { code, err: r.msg }
     r.barsObj = bars                     // compact 里要算 5 日线，临时挂上（不进存档）
-    return { code, r: r, flowSrc: ff.src, bars: bars.length, flowDays: ff.flows.length, src: srcOf[code] }
+    return { code, r: r, flowSrc: ff.src, bars: bars.length, flowDays: ff.flows.length, src: srcOf[code], holders: hd }
   })
   const results = await pool(3, tasks)
 
@@ -309,6 +356,17 @@ async function main() {
     console.log('★ 主力：' + r.mainBehavior.tag + ' — ' + r.mainBehavior.desc)
     console.log('★ 散户：' + r.retailBehavior.tag + ' — ' + r.retailBehavior.desc)
     console.log('★ 结论：[' + r.stance.tag + '] ' + r.stance.actionText + ' — ' + r.stance.desc)
+    if (one.holders && one.holders.length) {
+      console.log('股东人数（' + one.holders.length + ' 期，季度口径）：' +
+        one.holders.map(function (h) { return h.date.slice(2, 7) + ' ' + (h.num / 1e4).toFixed(2) + '万' +
+          (h.ratio != null ? '(' + (h.ratio > 0 ? '+' : '') + h.ratio + '%)' : '') }).join(' → '))
+      const t = one.holders[one.holders.length - 1]
+      console.log('  最新一期 ' + t.date + '：' + (t.num / 1e4).toFixed(2) + ' 万户' +
+        (t.ratio != null ? '，较上期 ' + (t.ratio > 0 ? '+' : '') + t.ratio + '%' : '') +
+        (t.focus ? '，' + t.focus : ''))
+    } else {
+      console.log('股东人数：无（F10 未取到或该股无披露）')
+    }
     if (r.notes.length) console.log('注：' + r.notes.join(' / '))
     return
   }
@@ -318,7 +376,7 @@ async function main() {
   /* 先保留存档里已有的（本轮没算到的股票不清空，避免临时失败丢数据） */
   for (const k of Object.keys(hist.stocks || {})) stocks[k] = hist.stocks[k]
   for (const x of ok) {
-    try { stocks[x.code] = compact(x.code, nameOf[x.code], x.r, x.flowSrc) }
+    try { stocks[x.code] = compact(x.code, nameOf[x.code], x.r, x.flowSrc, x.holders) }
     catch (e) { console.log('  ⚠️ ' + x.code + ' 压缩失败：' + e.message) }
   }
   /* 裁剪：只留最近 CHIP_KEEP 只（按日期新的优先） */
@@ -355,6 +413,9 @@ async function main() {
       Math.round(nextText.length / 1024) + ' KB')
   }
 }
+
+/* 导出给单测用的纯函数（2026-09-22）；main 仍只在直接运行时执行 */
+module.exports = { normHolders, HOLDER_KEEP }
 
 if (require.main === module) {
   main().catch(function (e) {
