@@ -68,6 +68,14 @@
       "target": 4.1,
       "enabled": true,
       "addedAt": "2026-09-21"
+    },
+    {
+      "code": "300433",
+      "name": "蓝思科技",
+      "condition": "lte",
+      "target": 30,
+      "enabled": true,
+      "addedAt": "2026-09-22"
     }
   ],
   "deleted": [],
