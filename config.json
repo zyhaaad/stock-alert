@@ -149,6 +149,13 @@
       "cost": 0,
       "qty": 0,
       "addedAt": null
+    },
+    {
+      "code": "600611",
+      "name": "大众交通",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
     }
   ]
 }
