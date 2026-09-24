@@ -610,6 +610,12 @@
    * ⚠️ 核心：单看资金流分不出"割肉"和"追高"，**必须叠加价格方向**。
    *   跌 + 主力买(散户卖) = 割肉      跌 + 主力卖(散户买) = 抄底
    *   涨 + 主力买(散户卖) = 获利了结   涨 + 主力卖(散户买) = 追高接筹码
+   *
+   * ★ 2026-09-22 文案口径（用户要求：只留一个方向结论，信息多了是干扰）：
+   *   上面那行「主力买/主力卖」是**判定口径**（散户方向 = −主力方向，分不开），
+   *   但 desc **只描述散户自己在干什么**，不再写「而主力正在卖给他们」「主力在悄悄给货」
+   *   这类独立的主力结论 —— 那是另一个维度的判断，与界面上的「趋势阶段」行会互相矛盾。
+   *   ⚠️ 只改文案措辞：判定条件、tone、key 一个都没动。
    */
   function judgeRetail(m) {
     var ret5 = m.vol.ret5, ret20 = m.vol.ret20;
@@ -627,11 +633,11 @@
     if (px < -flat) {
       if (retailBuying) {
         return { tag: '散户在抄底', tone: 'bad', key: 'dip-buy',
-          desc: '近 5 日股价 ' + pctMove + '，散户净买入 ' + moneyTxt + ' —— 越跌越买是散户最典型的动作，而主力同期在卖。下跌途中的抄底通常是接刀。' };
+          desc: '近 5 日股价 ' + pctMove + '，散户净买入 ' + moneyTxt + ' —— 越跌越买是散户最典型的动作，下跌途中的抄底通常是在接刀。' };
       }
       if (retailSelling) {
         return { tag: '散户在割肉', tone: 'good', key: 'surrender',
-          desc: '近 5 日股价 ' + pctMove + '，散户净卖出 ' + moneyTxt + ' —— 恐慌盘在往外倒，筹码正在从散户手里转到主力手里。' };
+          desc: '近 5 日股价 ' + pctMove + '，散户净卖出 ' + moneyTxt + ' —— 恐慌盘在往外倒，筹码正从散户手里出来。' };
       }
       return { tag: '散户在观望', tone: 'mute', key: 'watch',
         desc: '近 5 日股价 ' + pctMove + '，散户资金没什么动作，量能也没跟上，还在磨。' };
@@ -640,11 +646,11 @@
     if (px > flat) {
       if (retailBuying) {
         return { tag: '散户在追高接筹码', tone: 'bad', key: 'chase',
-          desc: '近 5 日股价 ' + pctMove + '，散户净买入 ' + moneyTxt + ' —— 涨上去才敢买，而主力正在卖给他们。这是最标准的接盘位置。' };
+          desc: '近 5 日股价 ' + pctMove + '，散户净买入 ' + moneyTxt + ' —— 涨上去才敢买，这是最标准的接盘位置。' };
       }
       if (retailSelling) {
         return { tag: '散户在获利了结', tone: 'good', key: 'take-profit',
-          desc: '近 5 日股价 ' + pctMove + '，散户净卖出 ' + moneyTxt + ' —— 涨一点就跑，筹码在往主力手里集中，这种涨势更容易延续。' };
+          desc: '近 5 日股价 ' + pctMove + '，散户净卖出 ' + moneyTxt + ' —— 涨一点就跑，筹码留不住。' };
       }
       return { tag: '散户在观望', tone: 'mute', key: 'watch-up',
         desc: '近 5 日股价 ' + pctMove + '，散户资金没大动作。' };
@@ -653,14 +659,14 @@
     /* 横盘 */
     if (retailBuying) {
       return { tag: '散户在慢慢买', tone: 'warn', key: 'slow-buy',
-        desc: '近 5 日横盘（' + pctMove + '），散户在小幅净买入 ' + moneyTxt + '，主力在悄悄给货。横盘里的换手要当心。' };
+        desc: '近 5 日横盘（' + pctMove + '），散户在小幅净买入 ' + moneyTxt + ' —— 横盘里还在小幅加仓，这种换手要当心。' };
     }
     if (retailSelling) {
       return { tag: '散户在磨走', tone: 'good', key: 'slow-sell',
         desc: '近 5 日横盘（' + pctMove + '），散户在小幅净卖出 ' + moneyTxt + '，拿不住的先走了，筹码在集中。' };
     }
     return { tag: '散户在僵持', tone: 'mute', key: 'stalemate',
-      desc: '近 5 日股价横着走（' + pctMove + '），散户与主力资金都基本持平，谁也占不到便宜。' };
+      desc: '近 5 日股价横着走（' + pctMove + '），买卖双方都基本持平，谁也占不到便宜。' };
   }
 
   /**
