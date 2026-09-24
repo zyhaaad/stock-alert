@@ -10,15 +10,25 @@
  *  3) 只用可回溯 3 年的数据源，保证"2年 / 全部"曲线不是从零开始。
  *
  *  指数构成（0-100，越大越贪婪）
- *    趋势动量   20%  中证全指 收盘 / MA20 - 1
- *    波动率     15%  中证全指 20 日对数收益年化波动率（**反向**：波动越大越恐慌）
- *    量能热度   15%  中证全指 5 日均量 / 20 日均量 - 1
- *    融资余额动能 25% 融资余额近 20 个交易日变化率
- *    融资净买入强度 25% 近 5 日融资净买入合计 / 流通市值
+ *    趋势动量   16%  中证全指 收盘 / MA20 - 1
+ *    波动率     12%  中证全指 20 日对数收益年化波动率（**反向**：波动越大越恐慌）
+ *    量能热度   12%  中证全指 5 日均量 / 20 日均量 - 1
+ *    融资余额动能 20% 融资余额近 20 个交易日变化率
+ *    融资净买入强度 20% 近 5 日融资净买入合计 / 流通市值
+ *    当日量价情绪 20%  当日涨跌 × 量能放大系数（**绝对映射，不做百分位**）
  *
- *  归一化：每个分项在"过去 252 个交易日"窗口内取中位秩百分位（0-100），
- *          再按权重加权求和。分项原始值随存档保存，控制台可用同一窗口
- *          现场算出"今天"的盘中值。
+ *  为什么加「当日量价情绪」（v2）：
+ *    原五因子全是慢变量（MA20 / 20 日波动率 / 5-20 日量比 / 两融 T+1），
+ *    恐慌性抛售当天反映不出来——量能热度甚至因为"放量"而升高，被算成贪婪。
+ *    v2 用当日可得的量价信息直接给出当日读数：
+ *      pan = 50 + 1000 × 当日涨跌 × (0.5 + 0.5 × clamp(当日量/前20日均量, 0, 2))
+ *    放量会放大当日的情绪幅度：放量下跌更恐惧，放量大涨更亢奋，缩量波动则打折。
+ *    另加一条硬约束：pan ≤ 20（约等于放量跌 3%）时，总分不得高于 38，
+ *    确保"恐慌性抛售当天一定落在恐惧区"。
+ *
+ *  归一化：前五个分项在"过去 252 个交易日"窗口内取中位秩百分位（0-100），
+ *          再按权重加权求和；当日量价情绪用绝对映射，不进百分位。
+ *          分项原始值随存档保存，控制台可用同一窗口现场算出"今天"的盘中值。
  *
  *  数据源（均为公开接口）
  *    中证全指日线：腾讯 web.ifzq.gtimg.cn（支持 CORS，浏览器可直连）
@@ -32,20 +42,30 @@
 
   /* ---------------- 常量 ---------------- */
 
-  var VERSION = 1;
+  var VERSION = 2;
 
-  /** 分项定义：k=存档键名，w=权重，invert=true 表示原始值越大越"恐惧" */
+  /** 分项定义：k=存档键名，w=权重，invert=true 表示原始值越大越"恐惧"，
+   *  abs=true 表示原始值本身就是 0-100 的读数，不进百分位窗口 */
   var COMPONENTS = [
-    { k: 'mom', name: '趋势动量', w: 0.20, invert: false, desc: '中证全指相对 20 日均线的偏离' },
-    { k: 'vol', name: '波动率', w: 0.15, invert: true, desc: '20 日年化波动率，波动越大越恐慌' },
-    { k: 'vlm', name: '量能热度', w: 0.15, invert: false, desc: '5 日均量相对 20 日均量的放大程度' },
-    { k: 'mgn', name: '融资余额动能', w: 0.25, invert: false, desc: '融资余额近 20 个交易日变化率' },
-    { k: 'mbs', name: '融资净买入强度', w: 0.25, invert: false, desc: '5 日融资净买入合计 / 流通市值' }
+    { k: 'mom', name: '趋势动量', w: 0.16, invert: false, desc: '中证全指相对 20 日均线的偏离' },
+    { k: 'vol', name: '波动率', w: 0.12, invert: true, desc: '20 日年化波动率，波动越大越恐慌' },
+    { k: 'vlm', name: '量能热度', w: 0.12, invert: false, desc: '5 日均量相对 20 日均量的放大程度' },
+    { k: 'mgn', name: '融资余额动能', w: 0.20, invert: false, desc: '融资余额近 20 个交易日变化率' },
+    { k: 'mbs', name: '融资净买入强度', w: 0.20, invert: false, desc: '5 日融资净买入合计 / 流通市值' },
+    /* optional：v1 存档（7 字段）里没有 pan。读到旧存档时该项自动缺席、
+     * 权重在其余五因子间重新归一化 —— 归一化后正好等于 v1 的原权重，
+     * 所以旧存档在新代码下算出来的值与 v1 完全一致，不会整页变 null。 */
+    { k: 'pan', name: '当日量价情绪', w: 0.20, invert: false, abs: true, optional: true, desc: '当日涨跌 × 量能放大：放量下跌更恐惧，放量大涨更亢奋' }
   ];
 
   var WIN = 252;      // 百分位窗口（交易日）
   var MIN_WIN = 60;   // 窗口最少样本数，不足则当日不出值
   var ANN = 244;      // 年化交易日数
+
+  /* ---- 当日量价情绪（v2 新增）---- */
+  var PAN_K = 1000;        // 涨跌 → 分值的放大系数
+  var PAN_CAP_THR = 25;    // pan 低于此值 = 恐慌性抛售（约占 2.9% 交易日，即每年 7 天左右）
+  var PAN_CAP = 38;        // ……则总分不得高于此值（确保落入恐惧区）
 
   /** 情绪分区（越大越贪婪）。hint 必须是有指向的提示，不能是「观望为主」这类通用话术 */
   var ZONES = [
@@ -122,7 +142,7 @@
    * margin: [{d,rzye,rzjme,ltsz}]（升序）
    */
   function rawsAt(kline, margin, i) {
-    var out = { mom: null, vol: null, vlm: null, mgn: null, mbs: null };
+    var out = { mom: null, vol: null, vlm: null, mgn: null, mbs: null, pan: null };
     var c = kline.c, v = kline.v, d = kline.d;
 
     // 趋势动量：收盘 / MA20 - 1
@@ -146,6 +166,19 @@
       var s20 = 0;
       for (var b = i - 19; b <= i; b++) s20 += v[b];
       if (s20 > 0) out.vlm = (s5 / 5) / (s20 / 20) - 1;
+    }
+
+    // 当日量价情绪：当日涨跌 × 量能放大系数（绝对映射 0-100，不进百分位）
+    // 量能系数用"不含当天"的前 20 日均量，避免自己抬高基准。
+    if (i >= 20 && c[i - 1] > 0) {
+      var pv = 0;
+      for (var t = i - 20; t < i; t++) pv += v[t];
+      var mv20 = pv / 20;
+      if (mv20 > 0) {
+        var vr = v[i] / mv20;
+        var kk = 0.5 + 0.5 * Math.min(Math.max(vr, 0), 2);  // 缩量 0.5→0.75，放量 2 倍→1.5
+        out.pan = Math.max(0, Math.min(100, 50 + PAN_K * (c[i] / c[i - 1] - 1) * kk));
+      }
     }
 
     // 融资类：用"日期严格早于当天"的最近一条两融记录
@@ -180,30 +213,57 @@
     if (!curRaw) return { v: null, reason: 'no-raw' };
 
     var tail = histRaws.length > win - 1 ? histRaws.slice(histRaws.length - (win - 1)) : histRaws;
-    var parts = {}, total = 0, wsum = 0;
+    var parts = {}, total = 0, wsum = 0, dropW = 0;
 
     for (var i = 0; i < comps.length; i++) {
       var cp = comps[i], k = cp.k;
       var cv = curRaw[k];
-      if (!validNum(cv)) return { v: null, reason: 'raw-missing:' + k };
-
-      var w = [];
-      for (var j = 0; j < tail.length; j++) {
-        if (validNum(tail[j][k])) w.push(tail[j][k]);
+      if (!validNum(cv)) {
+        // 可选分项（pan）缺席：扣掉它的权重，在其余分项间重新归一化，而不是整页出 null
+        if (cp.optional) { dropW += cp.w; continue }
+        return { v: null, reason: 'raw-missing:' + k };
       }
-      if (w.length < minWin) return { v: null, reason: 'window-too-short:' + k };
 
-      var p = pctRank(w.concat([cv]), cv);
-      if (p == null) return { v: null, reason: 'pct-fail:' + k };
-      if (cp.invert) p = 100 - p;
+      var p;
+      if (cp.abs) {
+        // 绝对映射分项：原始值本身即 0-100 读数，不进历史窗口
+        p = Math.max(0, Math.min(100, cv));
+      } else {
+        var w = [];
+        for (var j = 0; j < tail.length; j++) {
+          if (validNum(tail[j][k])) w.push(tail[j][k]);
+        }
+        if (w.length < minWin) return { v: null, reason: 'window-too-short:' + k };
+
+        p = pctRank(w.concat([cv]), cv);
+        if (p == null) return { v: null, reason: 'pct-fail:' + k };
+        if (cp.invert) p = 100 - p;
+      }
 
       parts[k] = Math.round(p * 10) / 10;
       total += cp.w * p;
       wsum += cp.w;
     }
 
+    /* 缺席的可选分项在上面已 continue，从未计入 wsum，
+     * 因此这里直接用 wsum 归一化即可 —— 权重会自动在有效分项间重新分配。 */
     if (!wsum) return { v: null, reason: 'no-weight' };
-    return { v: Math.round(total / wsum * 10) / 10, parts: parts };
+    var v = Math.round(total / wsum * 10) / 10;
+
+    // 恐慌硬约束：当日确认为恐慌性抛售时，总分强制落入恐惧区
+    var capped = applyPanicCap(v, curRaw.pan);
+
+    return { v: capped, parts: parts, capped: capped !== v };
+  }
+
+  /**
+   * 恐慌硬约束：pan ≤ PAN_CAP_THR 时总分不得高于 PAN_CAP。
+   * 纯函数，两端共用；pan 缺失（无当日行情）时不生效。
+   */
+  function applyPanicCap(v, pan) {
+    if (!validNum(v) || !validNum(pan)) return v;
+    if (pan > PAN_CAP_THR) return v;
+    return Math.min(v, PAN_CAP);
   }
 
   /* ---------------- 序列构建 ---------------- */
@@ -297,7 +357,8 @@
       arr.push([
         series[i].d,
         series[i].v == null ? null : series[i].v,
-        sig(r.mom), sig(r.vol), sig(r.vlm), sig(r.mgn), sig(r.mbs)
+        sig(r.mom), sig(r.vol), sig(r.vlm), sig(r.mgn), sig(r.mbs),
+        sig(r.pan == null ? null : r.pan)
       ]);
     }
     return arr;
@@ -314,7 +375,7 @@
     var series = [], raws = [];
     for (var i = 0; i < (arr || []).length; i++) {
       var row = arr[i];
-      var raw = { mom: num(row[2]), vol: num(row[3]), vlm: num(row[4]), mgn: num(row[5]), mbs: num(row[6]) };
+      var raw = { mom: num(row[2]), vol: num(row[3]), vlm: num(row[4]), mgn: num(row[5]), mbs: num(row[6]), pan: num(row[7]) };
       raws.push(raw);
       series.push({ d: row[0], v: num(row[1]), raw: raw });
     }
@@ -332,22 +393,38 @@
    * 建议必须与所处阶段强相关，禁止出现"观望为主"这种放之四海皆准的空话。
    * -------------------------------------------------------------------- */
 
+  /** 样本区间：与存档曲线范围一致（750 天存档，扣掉最后 60 天无前瞻，实为 690 天） */
+  var FORWARD_RANGE = '2023-08 ~ 2026-09';
+
   var FORWARD = {
-    fear:    { n: 380, r60:  4.02, label: '恐惧区（<40）' },
-    neutral: { n: 357, r60:  0.63, label: '中性区（40–60）' },
-    greed:   { n: 383, r60: -0.67, label: '贪婪区（≥60）' }
+    fear:    { n: 219, r60: 6.00, label: '恐惧区（<40）' },
+    neutral: { n: 244, r60: 1.37, label: '中性区（40–60）' },
+    greed:   { n: 227, r60: 1.02, label: '贪婪区（≥60）' }
   };
+
+  /** 五档细分：供文案引用。
+   *  ⚠️ 这三年整体上行，所以五档都是正的——不能说成"贪婪区必跌"，
+   *     只能说"越贪婪，之后的收益越薄"，这才是数据支持的结论。 */
+  var FORWARD_DETAIL = [
+    { lvl: 0, label: '极度恐惧（<25）', n: 47, r60: 6.22 },
+    { lvl: 1, label: '恐惧（25–40）', n: 172, r60: 5.95 },
+    { lvl: 2, label: '中性（40–60）', n: 244, r60: 1.37 },
+    { lvl: 3, label: '贪婪（60–75）', n: 176, r60: 1.09 },
+    { lvl: 4, label: '极度贪婪（≥75）', n: 51, r60: 0.80 }
+  ];
 
   /** lvl → 前瞻统计分组键 */
   function zoneKey(lvl) { return lvl <= 1 ? 'fear' : (lvl === 2 ? 'neutral' : 'greed'); }
 
-  var SHARED_NOTE = '以上是历史统计规律，不是对点位的预测。它的用处只有一个：'
-    + '在别人最恐慌的时候别割肉，在别人最亢奋的时候别追高。这两件事做到，长期结果就明显不同。';
+  var SHARED_NOTE = '以上是历史统计规律（样本区间 ' + FORWARD_RANGE + '），不是对点位的预测。'
+    + '注意：这三年整体上行，所以五档收益都是正的——要看的是「档位之间的差距」'
+    + '（恐惧区 +6.0% vs 贪婪区 +1.1%），而不是某一档的正负。'
+    + '它的用处只有一个：在别人最恐慌的时候别割肉，在别人最亢奋的时候别追高。这两件事做到，长期结果就明显不同。';
 
   var ADVICE = [
     { /* lvl 0 极度恐惧 */
-      view: '近一年最冷的位置。历史上这一类区间之后 60 个交易日平均是「涨」的，但过程通常很难受：'
-        + '可能还有最后一跌，阴跌、放量杀跌、反复磨底都很常见。'
+      view: '近一年最冷的位置。历史同类区间之后 60 个交易日平均 +6.2%，是五档里最高的一档，'
+        + '但过程通常很难受：可能还有最后一跌，阴跌、放量杀跌、反复磨底都很常见。'
         + '换句话说——「持股体验最差」和「离回暖最近」，往往就是同一段时间。',
       do: [
         '这本来就是给「想买但一直没敢买」的人准备的区间：把计划资金分成 3~4 份，逢大跌加一份，而不是等「跌到位」再一次性买。',
@@ -360,8 +437,8 @@
       ]
     },
     { /* lvl 1 恐惧 */
-      view: '情绪偏冷但还没到极端。历史同类区间之后 60 日的平均收益仍为正，只是幅度小于极度恐惧，'
-        + '中间往往还有一两次反复，别指望一买就涨。',
+      view: '情绪偏冷但还没到极端。历史同类区间之后 60 日平均 +6.0%，与极度恐惧区基本相当，'
+        + '都明显好于中性区（+1.4%）和贪婪区（+1.1%）。中间往往还有一两次反复，别指望一买就涨。',
       do: [
         '分批建仓的合适区间：先建到计划仓位的一半左右，留出后续加仓空间。',
         '已有仓位继续持有；现金比例别压到 0，也别全留现金。',
@@ -373,7 +450,8 @@
       ]
     },
     { /* lvl 2 中性 */
-      view: '多空相对均衡。历史上中性区间之后 60 日平均只有 +0.6% 左右，接近随机：'
+      view: '多空相对均衡。历史上中性区间之后 60 日平均只有 +1.4% 左右，'
+        + '远低于恐惧区的 +6.0%，接近随机：'
         + '这个阶段的涨跌主要由基本面和事件驱动，情绪本身不提供方向。',
       do: [
         '按你原本的计划执行：定投照常、调仓照常。这个阶段靠的是选股和纪律，不是情绪择时。',
@@ -384,8 +462,9 @@
       ]
     },
     { /* lvl 3 贪婪 */
-      view: '情绪偏热、资金活跃。历史上贪婪区间之后 60 个交易日平均是「负收益」，'
-        + '而且回撤往往比预期来得快——高位的第一根大阴线，常常就是情绪反转的开始。',
+      view: '情绪偏热、资金活跃。历史上这一档之后 60 个交易日平均只有 +1.1%，'
+        + '已经掉到恐惧区（+6.0%）的五分之一——不是立刻会跌，'
+        + '而是「再往上涨的空间和性价比都在明显变差」。高位的第一根大阴线，常常就是情绪反转的开始。',
       do: [
         '开始兑现一部分浮盈：可以按「每涨一档减一点」的节奏，把仓位降到你能睡得着觉的水平。',
         '停止新开仓和加仓，把注意力从「还能赚多少」转到「能保住多少」。'
@@ -397,7 +476,8 @@
     },
     { /* lvl 4 极度贪婪 */
       view: '近一年最热的位置：赚钱效应最好、群里最热闹，也最容易套人。'
-        + '历史同类区间之后 60 日平均负收益，且常伴随急跌。',
+        + '历史同类区间（≥75）之后 60 日平均 +0.8%，是五档里最低的一档，'
+        + '只有恐惧区（+6.0%）的八分之一，且常伴随急跌。',
       do: [
         '这个区间的正确动作是「减仓」（不是清仓）：优先卖出涨幅最大、最投机的部分，保留基本面最扎实的底仓。',
         '设好止盈线并执行，把一部分利润真正落袋，而不是停留在浮动收益上。',
@@ -488,6 +568,27 @@
     return streak > 1 && streak % REMIND_EVERY === 0;
   }
 
+  /* 恐慌脉冲（V2.1 事件层）：单日读数跌幅 ≥ drop 且当日仍处恐惧区。
+   * 回测（中证全指 2019-08~2026-09，n=41）：之后 20 日平均 +1.74%、上涨概率 68%
+   * （任意日基准约 53%）；注意单日跌幅 ≥20 分的深脉冲历史上多为下跌中继
+   * （之后 60 日为负），不在此触发范围内——由调用方按 drop≥20 自行警示。
+   * 只改事件层，不碰打分，VERSION 保持 2（存档完全兼容）。 */
+  var PULSE = { drop: 10, maxV: 40 };
+
+  /**
+   * 判断是否发生"恐慌脉冲"。
+   * @returns {null | {kind:'panic-pulse', title, drop, prev, cur}}
+   */
+  function pulseEvent(prevV, curV, opts) {
+    opts = opts || {};
+    var drop = (opts.drop == null || isNaN(opts.drop)) ? PULSE.drop : Number(opts.drop);
+    var maxV = (opts.maxV == null || isNaN(opts.maxV)) ? PULSE.maxV : Number(opts.maxV);
+    if (curV == null || isNaN(curV) || prevV == null || isNaN(prevV)) return null;
+    var dd = prevV - curV;
+    if (dd < drop || curV >= maxV) return null;
+    return { kind: 'panic-pulse', title: '恐慌脉冲', drop: dd, prev: prevV, cur: curV };
+  }
+
   return {
     VERSION: VERSION,
     COMPONENTS: COMPONENTS,
@@ -496,6 +597,10 @@
     WIN: WIN,
     MIN_WIN: MIN_WIN,
     ANN: ANN,
+    PAN_K: PAN_K,
+    PAN_CAP_THR: PAN_CAP_THR,
+    PAN_CAP: PAN_CAP,
+    applyPanicCap: applyPanicCap,
     mean: mean,
     stdev: stdev,
     pctRank: pctRank,
@@ -514,6 +619,8 @@
     sig: sig,
     calendarDaysFor: calendarDaysFor,
     FORWARD: FORWARD,
+    FORWARD_RANGE: FORWARD_RANGE,
+    FORWARD_DETAIL: FORWARD_DETAIL,
     ADVICE: ADVICE,
     SHARED_NOTE: SHARED_NOTE,
     zoneKey: zoneKey,
@@ -523,6 +630,8 @@
     EXTREME_KIND: EXTREME_KIND,
     extremeEvent: extremeEvent,
     extremeStreak: extremeStreak,
-    isReminderDay: isReminderDay
+    isReminderDay: isReminderDay,
+    PULSE: PULSE,
+    pulseEvent: pulseEvent
   };
 });
