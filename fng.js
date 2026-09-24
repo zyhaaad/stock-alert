@@ -12,6 +12,9 @@
  *        "别追在高点"、离开极值区提醒"回暖/降温"；长期停在极值区则每 5 个
  *        交易日提醒一次。只在"确实新增交易日"时推，不会重复打扰。
  *
+ *  额外（V2.1）：恐慌脉冲提醒——单日读数跌幅 ≥10 分且落入恐惧区时推一条
+ *        （回测：之后 20 日平均 +1.74%、胜率 68%）；cfg.fngAlert.pulse=false 关闭。
+ *
  *  用法：
  *    node fng.js              正常：补齐缺失交易日 + 刷新两融快照（已存档的日期不会被改写）
  *    node fng.js --backfill   首次全量生成（覆盖重算全部历史）
@@ -273,8 +276,36 @@ function extremeMessage(ev, cur, streak, peak) {
 }
 
 /**
+ * 恐慌脉冲提醒文案（V2.1 事件层）：单日跌幅 ≥ PULSE.drop 且当日仍在恐惧区。
+ * 回测口径（中证全指 2019-08~2026-09，n=41）：之后 10 日 +1.43%、20 日 +1.74%、
+ * 上涨概率 68%（任意日基准约 53%）。深脉冲（单日 ≥20 分）历史上多为下跌中继，
+ * 单独警示、不混在同一个文案里。
+ */
+function pulseMessage(pe, day) {
+  const head = (day && day.d ? day.d + '  ' : '') +
+    '恐贪 ' + pe.prev.toFixed(1) + ' → ' + pe.cur.toFixed(1) + '（' + core.zone(pe.cur).text + '）'
+  const deep = pe.drop >= 20
+  return {
+    title: '恐慌脉冲：恐贪单日 -' + pe.drop.toFixed(1) + ' 分至 ' + pe.cur.toFixed(1),
+    body: [
+      head,
+      '',
+      '单日跌幅 ≥ 10 分且落入恐惧区——这种「恐慌脉冲」历史上出现 41 次，',
+      '之后 20 个交易日平均 +1.74%、上涨概率约 68%（任意日基准约 53%）。',
+      '恐慌脉冲当天，历史上不是卖点。',
+      '',
+      deep
+        ? '⚠️ 但本次单日跌幅 ≥ 20 分：这种深脉冲历史上多为下跌中继（之后 60 日平均为负），先看趋势阶段再行动。'
+        : '该做的：别在脉冲当天恐慌割肉，按既定分批计划执行。',
+      deep ? '该做的：先确认趋势阶段，别急着抄底。' : '别做的：不要因为一根大阴线推翻计划，也不要立刻满仓抄底。'
+    ].join('\n')
+  }
+}
+
+/**
  * 检查并推送情绪极值提醒。
  * 只在"确有新增交易日"时调用 —— 同一天跑第二次（22:05 刷新两融）不会重复打扰。
+ * V2.1：极值事件优先；没有极值事件时检查恐慌脉冲（cfg.fngAlert.pulse === false 可关闭）。
  */
 async function maybeAlertExtreme(cfg, series) {
   if (series.length < 2) return null
@@ -287,6 +318,10 @@ async function maybeAlertExtreme(cfg, series) {
   let msg = null
   if (ev) msg = extremeMessage(ev, last.v, streak, last)
   else if (core.isReminderDay(streak)) msg = extremeMessage(null, last.v, streak, last)
+  else if (!cfg.fngAlert || cfg.fngAlert.pulse !== false) {
+    const pe = core.pulseEvent ? core.pulseEvent(prev.v, last.v) : null
+    if (pe) msg = pulseMessage(pe, last)
+  }
   if (!msg) return null
 
   const r = await push.push(cfg, msg.title, msg.body)
@@ -416,6 +451,7 @@ module.exports = {
   loadCfg: loadCfg,
   extremeOpts: extremeOpts,
   extremeMessage: extremeMessage,
+  pulseMessage: pulseMessage,
   maybeAlertExtreme: maybeAlertExtreme,
   HIST_PATH: HIST_PATH,
   KEEP: KEEP
