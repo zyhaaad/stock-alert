@@ -215,6 +215,13 @@
       "cost": 0,
       "qty": 0,
       "addedAt": null
+    },
+    {
+      "code": "002303",
+      "name": "美盈森",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
     }
   ]
 }
