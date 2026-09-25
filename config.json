@@ -208,6 +208,13 @@
       "cost": 0,
       "qty": 0,
       "addedAt": null
+    },
+    {
+      "code": "603099",
+      "name": "长白山",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
     }
   ]
 }
