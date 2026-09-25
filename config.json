@@ -82,7 +82,7 @@
       "name": "万华化学",
       "condition": "lte",
       "target": 60,
-      "enabled": false,
+      "enabled": true,
       "addedAt": "2026-09-23"
     },
     {
