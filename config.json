@@ -106,7 +106,7 @@
       "name": "麦迪科技",
       "condition": "lte",
       "target": 17,
-      "enabled": true,
+      "enabled": false,
       "addedAt": "2026-09-26"
     }
   ],
