@@ -1,0 +1,44 @@
+name: flow-daily
+
+# 板块资金流日更存档：每交易日收盘后把「行业全量 + 概念前80」的当日主力净流入
+# 增量写入 flow-history.json（保留 60 天），供控制台「资金流向监控」页在
+# 东财接口被限流/不可达时兜底直读。
+# cron 用 UTC：北京 16:10 = UTC 8:10（收盘后，fng-daily 16:05 之后错开 5 分钟）
+on:
+  schedule:
+    - cron: '10 8 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flow-daily
+  cancel-in-progress: false
+
+jobs:
+  flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Update sector fund-flow archive
+        run: node flow-daily.js
+
+      - name: Commit archive
+        run: |
+          git add flow-history.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update sector fund-flow archive [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "存档无变化"
+          fi
