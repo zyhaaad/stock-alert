@@ -33,10 +33,13 @@ async function getJSON(url) {
   return res.json()
 }
 
-/* type: 2=行业板块 3=概念板块；返回 { bk: [名称, f62万元, chgBp] } */
+/* type: 2=行业板块 3=概念板块；返回 { bk: [名称, f62万元, chgBp] }
+ * ⚠️ 必须走 push2delay + ut 令牌：push2 直连从 Actions 是 502/socket hang up
+ *    （style.js 已踩过的坑，注释原话），push2delay 收盘后跑无延迟问题 */
 async function fetchBoards(type, pz) {
-  const url = 'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
-    '&po=1&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type + '&fields=f12,f14,f2,f3,f62'
+  const url = 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
+    '&po=1&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
+    '&fields=f12,f14,f2,f3,f62&ut=b2884a393a59ad64002292a3e90d46a5'
   const j = await getJSON(url)
   const diff = (j && j.data && j.data.diff) || []
   if (!Array.isArray(diff) || !diff.length) throw new Error('clist 返回空（t=' + type + '）')
