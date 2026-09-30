@@ -220,12 +220,20 @@ async function main() {
   else hist.days.push(todayEntry)
   if (hist.days.length > KEEP) hist.days = hist.days.slice(-KEEP)
 
-  /* 月度累计（增量回补）：概念优先（用户关注度高），行业随后；8 分钟预算线防超时 */
+  /* 月度累计（增量回补）：概念优先（用户关注度高），行业随后；8 分钟预算线防超时。
+   * ⚠️ mon 必须容错：mon 被限流卡死时不能 cancel 掉整个 run（否则当日 days 增量
+   *    也丢——commit 在 mon 之后）。mon 失败 → 本日 mon 空缺，页面端浏览器
+   *    daykline 兜底，次日 cron 重试。 */
   if (!NOMON) {
-    console.log('开始月度累计增量回补（' + monthPrefix + '）…')
-    hist.mon = { ind: {}, con: {}, month: monthPrefix }
-    hist.mon.con = await buildMonthIncremental(hist.names, 3, monthPrefix, hist.days)
-    hist.mon.ind = await buildMonthIncremental(hist.names, 2, monthPrefix, hist.days)
+    try {
+      console.log('开始月度累计增量回补（' + monthPrefix + '）…')
+      hist.mon = { ind: {}, con: {}, month: monthPrefix }
+      hist.mon.con = await buildMonthIncremental(hist.names, 3, monthPrefix, hist.days)
+      hist.mon.ind = await buildMonthIncremental(hist.names, 2, monthPrefix, hist.days)
+    } catch (e) {
+      console.log('⚠️ mon 回补失败（不阻断日档保存，次日重试）：' + e.message)
+      delete hist.mon
+    }
   }
 
   hist.updated = t
