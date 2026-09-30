@@ -55,29 +55,24 @@ async function topStocks(bk) {
 }
 
 async function main() {
-  const all = {}
-  for (const [bk, name] of BKS) {
+  /* 实验A：个股 TOP5 请求形态对比（查「不同板块点开个股一样」）
+   * 页面现款 = push2 + fs=b:BK+f:!50 无 ut。变体：去 f:!50 / 带 ut / delay 域。 */
+  const variants = [
+    ['A现款 push2 f:!50', 'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK1648+f:!50&fields=f12,f14,f62'],
+    ['B无f:!50 push2',    'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK1648&fields=f12,f14,f62'],
+    ['C现款+ut push2',    'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK1648+f:!50&fields=f12,f14,f62&ut=b2884a393a59ad64002292a3e90d46a5'],
+    ['D delay+ut f:!50',  'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK1648+f:!50&fields=f12,f14,f62&ut=b2884a393a59ad64002292a3e90d46a5'],
+    ['E delay+ut 无f:!50','https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK1648&fields=f12,f14,f62&ut=b2884a393a59ad64002292a3e90d46a5'],
+    ['F对照 电网BK0457',  'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fid=f62&fs=b:BK0457&fields=f12,f14,f62&ut=b2884a393a59ad64002292a3e90d46a5']
+  ]
+  for (const [tag, url] of variants) {
     try {
-      const m = await monthCum(bk)
-      console.log('[月累计] ' + name + '(' + bk + ') 9月=' + (m.sep / 1e8).toFixed(1) + '亿 天数=' + m.n + ' 连续=' + m.streak + ' 末日=' + m.lastD)
-      all[bk] = name
-    } catch (e) { console.log('[月累计] ' + name + '(' + bk + ') 失败: ' + e.message) }
-  }
-  const sets = {}
-  for (const [bk, name] of BKS) {
-    try {
-      const st = await topStocks(bk)
-      sets[bk] = st
-      console.log('[个股TOP5] ' + name + '(' + bk + '): ' + st.join(' | '))
-    } catch (e) { console.log('[个股TOP5] ' + name + '(' + bk + ') 失败: ' + e.message) }
-  }
-  /* 重复性：两两比较交集 */
-  const keys = Object.keys(sets)
-  for (let i = 0; i < keys.length; i++) {
-    for (let j = i + 1; j < keys.length; j++) {
-      const a = new Set(sets[keys[i]]), inter = sets[keys[j]].filter(x => a.has(x))
-      if (inter.length) console.log('[重复] ' + all[keys[i]] + ' ∩ ' + all[keys[j]] + ' = ' + inter.length + ' 只: ' + inter.join(','))
-    }
+      const j = await getJSON(url)
+      const diff = (j && j.data && j.data.diff) || []
+      const total = j && j.data && j.data.total
+      console.log('[个股实验] ' + tag + ' → total=' + total + ' ' + (Array.isArray(diff) ? diff.slice(0, 5).map(d => d.f14).join(' | ') : 'diff异常'))
+    } catch (e) { console.log('[个股实验] ' + tag + ' → 失败: ' + e.message) }
+    await new Promise(r => setTimeout(r, 1200))
   }
   console.log('probe done')
 }
