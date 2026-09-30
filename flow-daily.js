@@ -8,8 +8,8 @@
  * 用法：node flow-daily.js [--dry]
  *
  * 设计要点：
- *   - 每天只发 2 个 clist 请求（行业/概念各一），GitHub Actions 的 IP 干净且频率极低，
- *     不会像浏览器端高频请求那样触发东财风控
+ *   - 每天只发 4 个 clist 请求（行业/概念 × 流入侧/流出侧），GitHub Actions 的 IP
+ *     干净且频率极低，不会像浏览器端高频请求那样触发东财风控
  *   - f62 取万元整数、f3 存涨跌幅 bp，控制存档体积（60 天约 100+KB）
  *   - 幂等：同一天重复跑只覆盖当天，不产生重复日期
  */
@@ -37,11 +37,21 @@ async function getJSON(url) {
  * ⚠️ 必须走 push2delay + ut 令牌：push2 直连从 Actions 是 502/socket hang up
  *    （style.js 已踩过的坑，注释原话），push2delay 收盘后跑无延迟问题 */
 async function fetchBoards(type, pz) {
-  const url = 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
-    '&po=1&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
-    '&fields=f12,f14,f2,f3,f62&ut=b2884a393a59ad64002292a3e90d46a5'
-  const j = await getJSON(url)
-  const diff = (j && j.data && j.data.diff) || []
+  /* po=1 按净流入降序（流入侧 TOP），po=0 升序（流出侧 TOP）。
+   * 两侧都要抓：只抓 po=1 会让存档没有净流出板块，页面云端兜底模式下
+   * 净流出栏为空（2026-09-30 实测 total=80 pos=80 neg=0）。
+   * 抓取面=两侧各 pz 个，交集去重；当月累计 TOP10 但当日两侧都不在
+   * pz 名内的板块会漏，属已知边界。 */
+  const mk = function (po) {
+    return 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
+      '&po=' + po + '&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
+      '&fields=f12,f14,f2,f3,f62&ut=b2884a393a59ad64002292a3e90d46a5'
+  }
+  const j1 = await getJSON(mk(1))
+  const j0 = await getJSON(mk(0))
+  const d1 = (j1 && j1.data && j1.data.diff) || []
+  const d0 = (j0 && j0.data && j0.data.diff) || []
+  const diff = d1.concat(d0)
   if (!Array.isArray(diff) || !diff.length) throw new Error('clist 返回空（t=' + type + '）')
   const out = {}
   for (const d of diff) {
