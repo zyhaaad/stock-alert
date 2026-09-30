@@ -19,7 +19,7 @@ concurrency:
 jobs:
   flow:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15   # mon 全量 360 板块 daykline ≈ 5-8 分钟（10 分钟曾被取消）
     steps:
       - uses: actions/checkout@v4
 
