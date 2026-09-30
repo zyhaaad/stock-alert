@@ -126,22 +126,71 @@ async function fetchMonth(bk, monthPrefix) {
   return has ? [Math.round(cum / 1e4), streak] : null
 }
 
-/* 全板块月度累计：逐板块 daykline，单并发 + 间隔（Actions 实测 push2his 可达）。
- * 失败的板块不写 mon 条目（页面端对其退回日档序列近似），不中断整体。 */
-async function buildMonth(names, monthPrefix) {
-  const bks = Object.keys(names)
+/* mon = 当月日档直接求和（零请求）+ daykline 只补缺缺日期（增量回补架构）。
+ * ★ push2his 对 Actions IP 高频限流（2026-09-30 首跑 61/200 成功、30% 成功率实测），
+ *   所以：当天补不齐没关系，失败的板块次日重试，随每日 cron 逐日补齐；
+ *   全覆盖的板块零请求，稳态每天只发 4 个 clist。 */
+async function buildMonthIncremental(names, type, monthPrefix, days) {
   const mon = {}
-  let ok = 0, fail = 0
-  for (let i = 0; i < bks.length; i++) {
-    const bk = bks[i]
-    try {
-      const m = await fetchMonth(bk, monthPrefix)
-      if (m) { mon[bk] = m; ok++ }
-    } catch (e) { fail++ }
-    if ((i + 1) % 40 === 0) console.log('  mon 进度 ' + (i + 1) + '/' + bks.length)
-    await new Promise(r => setTimeout(r, MON_GAP_MS))
+  let need = 0, ok = 0
+  const t0 = Date.now()
+  for (const bk of Object.keys(names)) {
+    /* 该板块当月已有日期集合（来自日档） */
+    const have = {}
+    for (const d of days) {
+      if (d.d.indexOf(monthPrefix) !== 0) continue
+      const g = type === 2 ? d.ind : d.con
+      if (g && g[bk] && g[bk].length >= 3) have[d.d] = 1
+    }
+    /* 当月已过交易日（近似=本月天数，月末对齐自然收敛）——有缺口才拉 daykline */
+    const monthDayCount = monthPrefix === bjToday().slice(0, 7)
+      ? new Date(Date.now() + 8 * 3600 * 1000).getUTCDate()
+      : 30
+    const covered = Object.keys(have).length >= monthDayCount
+    if (!covered) {
+      need++
+      if (Date.now() - t0 > 8 * 60 * 1000) { mon[bk] = null; continue }   /* 8 分钟预算线，剩余次日再补 */
+      try {
+        const url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=35&klt=101&secid=90.' + bk +
+          '&fields1=f1,f2,f3,f7&fields2=f51,f52'
+        const j = await getJSONFast(url)
+        const kl = (j && j.data && j.data.klines) || []
+        /* 把 daykline 里日档缺失的日期并入 days（保持日期序） */
+        let added = 0
+        for (const line of kl) {
+          const p = String(line).split(',')
+          if (p.length < 2 || p[0].indexOf(monthPrefix) !== 0) continue
+          if (have[p[0]]) continue
+          const f = Math.round((parseFloat(p[1]) || 0) / 1e4)
+          let slot = days.find(x => x.d === p[0])
+          if (!slot) { slot = { d: p[0], ind: {}, con: {} }; days.push(slot); days.sort((a, b) => a.d < b.d ? -1 : 1) }
+          const g = type === 2 ? slot.ind : slot.con
+          if (!g[bk]) { g[bk] = [String(names[bk] && names[bk][0] || bk), f, 0]; added++ }
+        }
+        if (added) ok++
+      } catch (e) { /* 失败次日重试 */ }
+      await new Promise(r => setTimeout(r, 250))
+    }
   }
-  console.log('mon 完成：' + ok + ' 成功 / ' + fail + ' 失败 / ' + bks.length + ' 总数')
+  /* mon = 当月日档求和（含刚回补的） */
+  for (const bk of Object.keys(names)) {
+    let cum = 0, has = false, streak = 0
+    const seq = []
+    for (const d of days) {
+      if (d.d.indexOf(monthPrefix) !== 0) continue
+      const g = type === 2 ? d.ind : d.con
+      if (g && g[bk] && g[bk].length >= 3) seq.push({ d: d.d, f: g[bk][1] })
+    }
+    for (const x of seq) { cum += x.f; has = true }
+    for (let i = seq.length - 1; i >= 0; i--) {
+      const f = seq[i].f
+      if (streak === 0) { if (f > 0) streak = 1; else if (f < 0) streak = -1; else break }
+      else if (streak > 0) { if (f > 0) streak++; else break }
+      else { if (f < 0) streak--; else break }
+    }
+    if (has) mon[bk] = [cum, streak]
+  }
+  console.log('mon(' + (type === 2 ? 'ind' : 'con') + '): 回补 ' + need + ' 板块（daykline 成功 ' + ok + '），mon 条目 ' + Object.keys(mon).length)
   return mon
 }
 
@@ -171,14 +220,12 @@ async function main() {
   else hist.days.push(todayEntry)
   if (hist.days.length > KEEP) hist.days = hist.days.slice(-KEEP)
 
-  /* 月度累计全量（跨月自然重置：monthPrefix=当月，上月数据不进 mon） */
+  /* 月度累计（增量回补）：概念优先（用户关注度高），行业随后；8 分钟预算线防超时 */
   if (!NOMON) {
-    console.log('开始拉取月度累计（' + monthPrefix + '）…')
+    console.log('开始月度累计增量回补（' + monthPrefix + '）…')
     hist.mon = { ind: {}, con: {}, month: monthPrefix }
-    const monInd = await buildMonth(Object.fromEntries(Object.keys(ind).map(k => [k, 1])), monthPrefix)
-    hist.mon.ind = monInd
-    const monCon = await buildMonth(Object.fromEntries(Object.keys(con).map(k => [k, 1])), monthPrefix)
-    hist.mon.con = monCon
+    hist.mon.con = await buildMonthIncremental(hist.names, 3, monthPrefix, hist.days)
+    hist.mon.ind = await buildMonthIncremental(hist.names, 2, monthPrefix, hist.days)
   }
 
   hist.updated = t
