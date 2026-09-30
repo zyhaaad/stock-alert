@@ -28,9 +28,24 @@ function bjToday() {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url, { headers: UA })
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + url.slice(0, 80))
-  return res.json()
+  /* push2delay 从 Actions 间歇性 502（08:24Z 成功、12:00Z 失败实测），
+   * 退避重试 4 次：3s / 6s / 10s */
+  const wait = ms => new Promise(r => setTimeout(r, ms))
+  let lastErr
+  for (let i = 0; i < 4; i++) {
+    try {
+      const res = await fetch(url, { headers: UA })
+      if (res.ok) return res.json()
+      lastErr = new Error('HTTP ' + res.status + ' ' + url.slice(0, 80))
+      if (res.status !== 502 && res.status !== 503 && res.status !== 429) throw lastErr
+    } catch (e) {
+      /* 网络层异常（socket hang up 等）也重试，但 4xx 参数错重试无意义 */
+      if (/HTTP 4/.test(String(e && e.message)) && !/HTTP 429/.test(String(e && e.message))) throw e
+      lastErr = e
+    }
+    if (i < 3) await wait([3000, 6000, 10000][i])
+  }
+  throw lastErr
 }
 
 /* type: 2=行业板块 3=概念板块；返回 { bk: [名称, f62万元, chgBp] }
