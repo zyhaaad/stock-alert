@@ -29,7 +29,23 @@ const DRY = process.argv.includes('--dry')
 const NOMON = process.argv.includes('--nomon')
 const KEEP = 60
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://quote.eastmoney.com/' }
-const MON_GAP_MS = 350   /* daykline 单并发间隔：200 板块 ≈ 70 秒 */
+const MON_GAP_MS = 250   /* daykline 单并发间隔：360 板块（行业200+概念160）≈ 3-5 分钟 */
+
+/* daykline 轻量重试（mon 用）：2 次尝试，避免个别 502 吃掉长退避拖垮 workflow 时限；
+ * 失败板块直接跳过（mon 缺条目 → 页面端退回日档近似并标注），次日自动重试补齐 */
+async function getJSONFast(url) {
+  const wait = ms => new Promise(r => setTimeout(r, ms))
+  let lastErr
+  for (let i = 0; i < 2; i++) {
+    try {
+      const res = await fetch(url, { headers: UA })
+      if (res.ok) return res.json()
+      lastErr = new Error('HTTP ' + res.status)
+    } catch (e) { lastErr = e }
+    if (i < 1) await wait(1500)
+  }
+  throw lastErr
+}
 
 function bjToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
@@ -89,7 +105,7 @@ async function fetchBoards(type, pz) {
 async function fetchMonth(bk, monthPrefix) {
   const url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=35&klt=101&secid=90.' + bk +
     '&fields1=f1,f2,f3,f7&fields2=f51,f52'
-  const j = await getJSON(url)
+  const j = await getJSONFast(url)
   const kl = (j && j.data && j.data.klines) || []
   let cum = 0, has = false, streak = 0
   for (const line of kl) {
