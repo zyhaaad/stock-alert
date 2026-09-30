@@ -1,17 +1,23 @@
 #!/usr/bin/env node
-/* 板块资金流日更存档（2026-09-29）
+/* 板块资金流日更存档（2026-09-29；2026-09-30 加月度累计全量）
  * 作用：每交易日收盘后跑一次，把「行业板块全量 + 概念板块前 80」的当日主力净流入
  *       增量写入 flow-history.json（保留最近 60 个交易日）。
- * 页面（资金流向监控）在东财接口被限流/不可达时，直读这份存档兜底：
+ *       2026-09-30 起追加 mon 字段：逐板块拉 daykline(35 天) 算「当月累计主力净额 +
+ *       月内连续天数」全量存档——页面端主排序口径是当月累计（用户原话「抓的不是
+ *       当日的 TOP，是当月累计的 TOP」），但云端日档只有逐日增量、算不出真月累计
+ *       （电池技术 9 月真实 -806 亿，2 天日档却算出 +1.9 亿 → 板块从榜上消失）。
+ * 页面（资金流向监控）直读这份存档作主数据源/兜底：
  *   https://raw.githubusercontent.com/zyhaaad/stock-alert/main/flow-history.json
  *
- * 用法：node flow-daily.js [--dry]
+ * 用法：node flow-daily.js [--dry] [--nomon]
  *
  * 设计要点：
- *   - 每天只发 4 个 clist 请求（行业/概念 × 流入侧/流出侧），GitHub Actions 的 IP
- *     干净且频率极低，不会像浏览器端高频请求那样触发东财风控
- *   - f62 取万元整数、f3 存涨跌幅 bp，控制存档体积（60 天约 100+KB）
- *   - 幂等：同一天重复跑只覆盖当天，不产生重复日期
+ *   - clist 4 请求（行业/概念 × 流入/流出侧）+ daykline 约 200 请求（仅 --nomon 跳过），
+ *     GitHub Actions 的 IP 干净、单并发 350ms，实测 push2his 板块日资金流从 Actions 可达
+ *     （个股 clist 从 Actions 被 502 拒绝，板块级没问题——东财风控分级，2026-09-30 实测）
+ *   - f62 取万元整数、f3 存涨跌幅 bp，mon 存 [当月累计万元, 月内连续天数(±)]，
+ *     控制存档体积（60 天约 150KB）
+ *   - 幂等：days 里当天覆盖；mon 每天全量重算覆盖
  */
 'use strict'
 const fs = require('fs')
@@ -20,8 +26,10 @@ const path = require('path')
 const DIR = __dirname
 const HIST_PATH = path.join(DIR, 'flow-history.json')
 const DRY = process.argv.includes('--dry')
+const NOMON = process.argv.includes('--nomon')
 const KEEP = 60
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://quote.eastmoney.com/' }
+const MON_GAP_MS = 350   /* daykline 单并发间隔：200 板块 ≈ 70 秒 */
 
 function bjToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
@@ -53,10 +61,7 @@ async function getJSON(url) {
  *    （style.js 已踩过的坑，注释原话），push2delay 收盘后跑无延迟问题 */
 async function fetchBoards(type, pz) {
   /* po=1 按净流入降序（流入侧 TOP），po=0 升序（流出侧 TOP）。
-   * 两侧都要抓：只抓 po=1 会让存档没有净流出板块，页面云端兜底模式下
-   * 净流出栏为空（2026-09-30 实测 total=80 pos=80 neg=0）。
-   * 抓取面=两侧各 pz 个，交集去重；当月累计 TOP10 但当日两侧都不在
-   * pz 名内的板块会漏，属已知边界。 */
+   * 两侧都要抓：只抓 po=1 会让存档没有净流出板块（2026-09-30 实测 total=80 pos=80 neg=0） */
   const mk = function (po) {
     return 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
       '&po=' + po + '&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
@@ -80,8 +85,53 @@ async function fetchBoards(type, pz) {
   return out
 }
 
+/* 单板块 daykline(35 天) → 当月累计(元→万元取整) + 月内连续天数(±) */
+async function fetchMonth(bk, monthPrefix) {
+  const url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=35&klt=101&secid=90.' + bk +
+    '&fields1=f1,f2,f3,f7&fields2=f51,f52'
+  const j = await getJSON(url)
+  const kl = (j && j.data && j.data.klines) || []
+  let cum = 0, has = false, streak = 0
+  for (const line of kl) {
+    const p = String(line).split(',')
+    if (p.length < 2 || p[0].indexOf(monthPrefix) !== 0) continue
+    const f = parseFloat(p[1])
+    if (isFinite(f)) { cum += f; has = true }
+  }
+  for (let i = kl.length - 1; i >= 0; i--) {
+    const p = String(kl[i]).split(',')
+    if (p.length < 2 || p[0].indexOf(monthPrefix) !== 0) break
+    const f = parseFloat(p[1])
+    if (!isFinite(f)) break
+    if (streak === 0) { if (f > 0) streak = 1; else if (f < 0) streak = -1; else break }
+    else if (streak > 0) { if (f > 0) streak++; else break }
+    else { if (f < 0) streak--; else break }
+  }
+  return has ? [Math.round(cum / 1e4), streak] : null
+}
+
+/* 全板块月度累计：逐板块 daykline，单并发 + 间隔（Actions 实测 push2his 可达）。
+ * 失败的板块不写 mon 条目（页面端对其退回日档序列近似），不中断整体。 */
+async function buildMonth(names, monthPrefix) {
+  const bks = Object.keys(names)
+  const mon = {}
+  let ok = 0, fail = 0
+  for (let i = 0; i < bks.length; i++) {
+    const bk = bks[i]
+    try {
+      const m = await fetchMonth(bk, monthPrefix)
+      if (m) { mon[bk] = m; ok++ }
+    } catch (e) { fail++ }
+    if ((i + 1) % 40 === 0) console.log('  mon 进度 ' + (i + 1) + '/' + bks.length)
+    await new Promise(r => setTimeout(r, MON_GAP_MS))
+  }
+  console.log('mon 完成：' + ok + ' 成功 / ' + fail + ' 失败 / ' + bks.length + ' 总数')
+  return mon
+}
+
 async function main() {
   const t = bjToday()
+  const monthPrefix = t.slice(0, 7)
   const ind = await fetchBoards(2, 100)
   const con = await fetchBoards(3, 80)
   const nInd = Object.keys(ind).length
@@ -92,7 +142,7 @@ async function main() {
   if (fs.existsSync(HIST_PATH)) {
     try {
       const prev = JSON.parse(fs.readFileSync(HIST_PATH, 'utf8'))
-      if (prev && prev.days) hist = { names: prev.names || {}, days: prev.days }
+      if (prev && prev.days) hist = { names: prev.names || {}, days: prev.days, mon: prev.mon }
     } catch (e) { console.log('⚠️ 旧存档解析失败，重建：' + e.message) }
   }
 
@@ -104,11 +154,22 @@ async function main() {
   if (idx >= 0) hist.days[idx] = todayEntry
   else hist.days.push(todayEntry)
   if (hist.days.length > KEEP) hist.days = hist.days.slice(-KEEP)
-  hist.updated = t
 
+  /* 月度累计全量（跨月自然重置：monthPrefix=当月，上月数据不进 mon） */
+  if (!NOMON) {
+    console.log('开始拉取月度累计（' + monthPrefix + '）…')
+    hist.mon = { ind: {}, con: {}, month: monthPrefix }
+    const monInd = await buildMonth(Object.fromEntries(Object.keys(ind).map(k => [k, 1])), monthPrefix)
+    hist.mon.ind = monInd
+    const monCon = await buildMonth(Object.fromEntries(Object.keys(con).map(k => [k, 1])), monthPrefix)
+    hist.mon.con = monCon
+  }
+
+  hist.updated = t
   const body = JSON.stringify(hist)
+  const nMon = hist.mon ? (Object.keys(hist.mon.ind).length + Object.keys(hist.mon.con).length) : 0
   const summary = t + '  行业 ' + nInd + ' + 概念 ' + nCon + '  存档 ' + hist.days.length +
-    ' 天  ' + Math.round(body.length / 1024) + 'KB'
+    ' 天  mon ' + nMon + '  ' + Math.round(body.length / 1024) + 'KB'
   if (DRY) {
     console.log('[dry] ' + summary)
     return
