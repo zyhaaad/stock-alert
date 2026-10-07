@@ -4,6 +4,8 @@ name: flow-daily
 # 增量写入 flow-history.json（保留 60 天），供控制台「资金流向监控」页在
 # 东财接口被限流/不可达时兜底直读。
 # cron 用 UTC：北京 16:10 = UTC 8:10（收盘后，fng-daily 16:05 之后错开 5 分钟）
+# ⚠️ 非交易日（A 股节假日）在这里是**照常触发**的：cron 的 1-5 只认工作日。
+#    脚本内有交易日闸门（trade-day.js）→ 非交易日打印一行后直接退出、不写盘、不产生 commit。
 on:
   schedule:
     - cron: '10 8 * * 1-5'
@@ -19,7 +21,8 @@ concurrency:
 jobs:
   flow:
     runs-on: ubuntu-latest
-    timeout-minutes: 15   # mon 全量 360 板块 daykline ≈ 5-8 分钟（10 分钟曾被取消）
+    # 增量回补后稳态只发 4 个 clist（约 10 秒）；首次/缺口大时最多 8 分钟预算线（脚本内自控）
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
