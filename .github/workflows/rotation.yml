@@ -37,6 +37,13 @@ jobs:
 
       - name: Commit archive
         run: |
+          # 首次运行前 rotation.json 还不存在；非交易日被闸门拦截、或成功率 <60% 不写盘时也不会生成。
+          # 这两种情况都要**干净退出**（否则 git add 报 pathspec 不匹配 → 整个 job 判失败，
+          # 把"正常跳过"显示成"出错"，会误导排查）。
+          if [ ! -f rotation.json ]; then
+            echo "本次未生成存档（非交易日 / 成功率不足 / 首次运行），跳过提交"
+            exit 0
+          fi
           git add rotation.json
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
