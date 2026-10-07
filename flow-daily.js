@@ -12,12 +12,19 @@
  * 用法：node flow-daily.js [--dry] [--nomon]
  *
  * 设计要点：
- *   - clist 4 请求（行业/概念 × 流入/流出侧）+ daykline 约 200 请求（仅 --nomon 跳过），
- *     GitHub Actions 的 IP 干净、单并发 350ms，实测 push2his 板块日资金流从 Actions 可达
- *     （个股 clist 从 Actions 被 502 拒绝，板块级没问题——东财风控分级，2026-09-30 实测）
+ *   - **交易日闸门**（2026-10-07）：非交易日直接退出、不写盘。cron 是 `1-5` 工作日制，
+ *     不认 A 股节假日；否则假期每天都跑（超时浪费配额），侥幸跑通还会把上一交易日
+ *     数据写成假期当天的条目（脏数据）。双信号取「或」防单接口滞后误跳过。
+ *   - clist 4 请求（行业/概念 × 流入/流出侧，每交易日固定）+ daykline **增量回补**
+ *     （只为「当月交易日没补全」的板块发请求，覆盖率对齐交易日历；稳态 0 请求）。
+ *     GitHub Actions 的 IP 干净：push2his 板块日资金流从 Actions 可达
+ *     （个股 clist 从 Actions 被 502 拒绝，板块级没问题——东财风控分级，2026-09-30 实测），
+ *     但**高频会被限流**（2026-09-30 首跑 61/200 成功≈30%），所以失败的板块次日重试、逐日收敛。
  *   - f62 取万元整数、f3 存涨跌幅 bp，mon 存 [当月累计万元, 月内连续天数(±)]，
  *     控制存档体积（60 天约 150KB）
- *   - 幂等：days 里当天覆盖；mon 每天全量重算覆盖
+ *   - 幂等：days 里当天覆盖；mon = 当月日档直接求和（不发额外请求）
+ *   - mon 段整体 try/catch：被限流卡死时不能让 mon 拖 cancel 掉整个 run，
+ *     否则 commit 在其后的当日 days 增量也会丢
  */
 'use strict'
 const fs = require('fs')
@@ -126,36 +133,65 @@ async function fetchMonth(bk, monthPrefix) {
   return has ? [Math.round(cum / 1e4), streak] : null
 }
 
-/* mon = 当月日档直接求和（零请求）+ daykline 只补缺缺日期（增量回补架构）。
+/* 交易日历：腾讯中证全指 K 线取最近交易日（与 screener.js 同方案，腾讯域对 Actions 稳定）。
+ * ⚠️ 2026-10-07 修 bug：cron 是 `1-5` 工作日，不认 A 股节假日 → 国庆等假期里每次都跑、
+ *    都超时取消（浪费配额），且若侥幸跑通会把上一交易日数据写成假期当天的条目（脏数据）。
+ *    现在：非交易日直接退出不写盘。 */
+async function fetchTradingDates(n) {
+  try {
+    const j = await getJSONFast('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,,' + (n + 10) + ',qfq')
+    const key = j.data && Object.keys(j.data)[0]
+    const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
+    if (!raw) return null
+    return raw.map(r => String(r[0])).slice(-n)
+  } catch (e) { return null }
+}
+
+/* 交易日**交叉验证**（2026-10-07 加）：腾讯实时行情里的行情时间戳（假期时停在上一交易日）。
+ * 动机：单靠日线日历有反向风险——若指数日线在收盘后尚未更新，真实交易日会被误判成
+ *      「非交易日」而整日跳过（丢一天日档）。两个信号取「或」：只要有一个说今天是交易日就干。
+ * 实现：用 latin1 读原始字节（时间戳是 ASCII，不依赖 Node 的 gbk/ICU 支持），
+ *      字段为 `~YYYYMMDDHHMMSS~`，实测该 14 位片段在响应中唯一。 */
+async function fetchQuoteDate() {
+  try {
+    const res = await fetch('https://qt.gtimg.cn/q=sh000985', { headers: UA })
+    if (!res.ok) return null
+    const txt = Buffer.from(await res.arrayBuffer()).toString('latin1')
+    const m = txt.match(/~(\d{14})~/)
+    return m ? m[1].slice(0, 8) : null   /* YYYYMMDD | null */
+  } catch (e) { return null }
+}
+
+/* mon = 当月日档直接求和（零请求）+ daykline 只补日档缺失的交易日（增量回补架构）。
  * ★ push2his 对 Actions IP 高频限流（2026-09-30 首跑 61/200 成功、30% 成功率实测），
  *   所以：当天补不齐没关系，失败的板块次日重试，随每日 cron 逐日补齐；
- *   全覆盖的板块零请求，稳态每天只发 4 个 clist。 */
-async function buildMonthIncremental(names, type, monthPrefix, days) {
+ *   全部交易日已覆盖的板块零请求，稳态每天只发 4 个 clist。 */
+async function buildMonthIncremental(names, type, monthPrefix, days, tradeDates, todayStr) {
   const mon = {}
+  const monthTrade = (tradeDates || []).filter(d => d.indexOf(monthPrefix) === 0)
+  const lastTradeDay = monthTrade.length ? monthTrade[monthTrade.length - 1] : todayStr
   let need = 0, ok = 0
   const t0 = Date.now()
   for (const bk of Object.keys(names)) {
-    /* 该板块当月已有日期集合（来自日档） */
+    /* 该板块当月已有日期集合（来自日档 + 历次 daykline 回补） */
     const have = {}
     for (const d of days) {
       if (d.d.indexOf(monthPrefix) !== 0) continue
       const g = type === 2 ? d.ind : d.con
       if (g && g[bk] && g[bk].length >= 3) have[d.d] = 1
     }
-    /* 当月已过交易日（近似=本月天数，月末对齐自然收敛）——有缺口才拉 daykline */
-    const monthDayCount = monthPrefix === bjToday().slice(0, 7)
-      ? new Date(Date.now() + 8 * 3600 * 1000).getUTCDate()
-      : 30
-    const covered = Object.keys(have).length >= monthDayCount
+    /* 覆盖判定：当月全部「已过交易日」都有 → 零请求（对齐交易日历，不再用自然日） */
+    const covered = monthTrade.length
+      ? monthTrade.every(d => have[d])
+      : Object.keys(have).length > 0
     if (!covered) {
       need++
-      if (Date.now() - t0 > 8 * 60 * 1000) { mon[bk] = null; continue }   /* 8 分钟预算线，剩余次日再补 */
+      if (Date.now() - t0 > 8 * 60 * 1000) continue   /* 8 分钟预算线，剩余次日再补 */
       try {
         const url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=35&klt=101&secid=90.' + bk +
           '&fields1=f1,f2,f3,f7&fields2=f51,f52'
         const j = await getJSONFast(url)
         const kl = (j && j.data && j.data.klines) || []
-        /* 把 daykline 里日档缺失的日期并入 days（保持日期序） */
         let added = 0
         for (const line of kl) {
           const p = String(line).split(',')
@@ -172,7 +208,7 @@ async function buildMonthIncremental(names, type, monthPrefix, days) {
       await new Promise(r => setTimeout(r, 250))
     }
   }
-  /* mon = 当月日档求和（含刚回补的） */
+  /* mon = 当月日档求和（含刚回补的）；连续天数按月内末段方向 */
   for (const bk of Object.keys(names)) {
     let cum = 0, has = false, streak = 0
     const seq = []
@@ -190,13 +226,28 @@ async function buildMonthIncremental(names, type, monthPrefix, days) {
     }
     if (has) mon[bk] = [cum, streak]
   }
-  console.log('mon(' + (type === 2 ? 'ind' : 'con') + '): 回补 ' + need + ' 板块（daykline 成功 ' + ok + '），mon 条目 ' + Object.keys(mon).length)
+  console.log('mon(' + (type === 2 ? 'ind' : 'con') + '): 回补 ' + need + ' 板块（daykline 成功 ' + ok +
+    '），mon 条目 ' + Object.keys(mon).length + '，当月交易日 ' + monthTrade.length + ' 天（最新 ' + lastTradeDay + '）')
   return mon
 }
 
 async function main() {
   const t = bjToday()
   const monthPrefix = t.slice(0, 7)
+  /* 交易日闸门：非交易日直接退出（不写盘）——cron 是工作日制，不认 A 股节假日
+   * （国庆假期 2026-10-01~10-07 每次都跑、都超时取消；侥幸跑通会写脏数据）
+   * 双信号取「或」：日历（日线最新交易日）+ 实时行情时间戳，避免任一接口滞后导致误跳过 */
+  const tradeDates = await fetchTradingDates(60)
+  const qDate = await fetchQuoteDate()                       /* YYYYMMDD | null */
+  const lastCal = (tradeDates && tradeDates.length) ? tradeDates[tradeDates.length - 1] : null
+  const calSay = lastCal === t
+  const qSay = qDate === t.replace(/-/g, '')
+  if ((lastCal || qDate) && !calSay && !qSay) {
+    console.log('非交易日（交易日历最新 ' + (lastCal || '?') + '，行情时间戳 ' + (qDate || '?') +
+      '，今天 ' + t + '）→ 跳过，不写盘')
+    return
+  }
+  if (!lastCal && !qDate) console.log('⚠️ 交易日历与行情时间戳都取不到，按原有流程继续')
   const ind = await fetchBoards(2, 100)
   const con = await fetchBoards(3, 80)
   const nInd = Object.keys(ind).length
@@ -228,8 +279,8 @@ async function main() {
     try {
       console.log('开始月度累计增量回补（' + monthPrefix + '）…')
       hist.mon = { ind: {}, con: {}, month: monthPrefix }
-      hist.mon.con = await buildMonthIncremental(hist.names, 3, monthPrefix, hist.days)
-      hist.mon.ind = await buildMonthIncremental(hist.names, 2, monthPrefix, hist.days)
+      hist.mon.con = await buildMonthIncremental(hist.names, 3, monthPrefix, hist.days, tradeDates, t)
+      hist.mon.ind = await buildMonthIncremental(hist.names, 2, monthPrefix, hist.days, tradeDates, t)
     } catch (e) {
       console.log('⚠️ mon 回补失败（不阻断日档保存，次日重试）：' + e.message)
       delete hist.mon
