@@ -133,34 +133,9 @@ async function fetchMonth(bk, monthPrefix) {
   return has ? [Math.round(cum / 1e4), streak] : null
 }
 
-/* 交易日历：腾讯中证全指 K 线取最近交易日（与 screener.js 同方案，腾讯域对 Actions 稳定）。
- * ⚠️ 2026-10-07 修 bug：cron 是 `1-5` 工作日，不认 A 股节假日 → 国庆等假期里每次都跑、
- *    都超时取消（浪费配额），且若侥幸跑通会把上一交易日数据写成假期当天的条目（脏数据）。
- *    现在：非交易日直接退出不写盘。 */
-async function fetchTradingDates(n) {
-  try {
-    const j = await getJSONFast('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,,' + (n + 10) + ',qfq')
-    const key = j.data && Object.keys(j.data)[0]
-    const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
-    if (!raw) return null
-    return raw.map(r => String(r[0])).slice(-n)
-  } catch (e) { return null }
-}
-
-/* 交易日**交叉验证**（2026-10-07 加）：腾讯实时行情里的行情时间戳（假期时停在上一交易日）。
- * 动机：单靠日线日历有反向风险——若指数日线在收盘后尚未更新，真实交易日会被误判成
- *      「非交易日」而整日跳过（丢一天日档）。两个信号取「或」：只要有一个说今天是交易日就干。
- * 实现：用 latin1 读原始字节（时间戳是 ASCII，不依赖 Node 的 gbk/ICU 支持），
- *      字段为 `~YYYYMMDDHHMMSS~`，实测该 14 位片段在响应中唯一。 */
-async function fetchQuoteDate() {
-  try {
-    const res = await fetch('https://qt.gtimg.cn/q=sh000985', { headers: UA })
-    if (!res.ok) return null
-    const txt = Buffer.from(await res.arrayBuffer()).toString('latin1')
-    const m = txt.match(/~(\d{14})~/)
-    return m ? m[1].slice(0, 8) : null   /* YYYYMMDD | null */
-  } catch (e) { return null }
-}
+/* 交易日判定统一走 trade-day.js（单一真源）：日历（日线最新交易日）+ 实时行情时间戳
+ * 双信号取「或」，避免任一接口滞后把真实交易日误判成非交易日 */
+const TD = require('./trade-day.js')
 
 /* mon = 当月日档直接求和（零请求）+ daykline 只补日档缺失的交易日（增量回补架构）。
  * ★ push2his 对 Actions IP 高频限流（2026-09-30 首跑 61/200 成功、30% 成功率实测），
@@ -236,18 +211,14 @@ async function main() {
   const monthPrefix = t.slice(0, 7)
   /* 交易日闸门：非交易日直接退出（不写盘）——cron 是工作日制，不认 A 股节假日
    * （国庆假期 2026-10-01~10-07 每次都跑、都超时取消；侥幸跑通会写脏数据）
-   * 双信号取「或」：日历（日线最新交易日）+ 实时行情时间戳，避免任一接口滞后导致误跳过 */
-  const tradeDates = await fetchTradingDates(60)
-  const qDate = await fetchQuoteDate()                       /* YYYYMMDD | null */
-  const lastCal = (tradeDates && tradeDates.length) ? tradeDates[tradeDates.length - 1] : null
-  const calSay = lastCal === t
-  const qSay = qDate === t.replace(/-/g, '')
-  if ((lastCal || qDate) && !calSay && !qSay) {
-    console.log('非交易日（交易日历最新 ' + (lastCal || '?') + '，行情时间戳 ' + (qDate || '?') +
-      '，今天 ' + t + '）→ 跳过，不写盘')
+   * 判定逻辑见 trade-day.js（双信号取「或」，防单接口滞后误跳过） */
+  const g = await TD.gate(t)
+  const tradeDates = g.dates
+  if (g.isTrading === false) {
+    console.log('非交易日（' + TD.describe(g) + '）→ 跳过，不写盘')
     return
   }
-  if (!lastCal && !qDate) console.log('⚠️ 交易日历与行情时间戳都取不到，按原有流程继续')
+  if (g.isTrading === null) console.log('⚠️ 交易日历与行情时间戳都取不到（' + TD.describe(g) + '），按原有流程继续')
   const ind = await fetchBoards(2, 100)
   const con = await fetchBoards(3, 80)
   const nInd = Object.keys(ind).length
