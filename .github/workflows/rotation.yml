@@ -1,0 +1,49 @@
+name: rotation-daily
+
+# 板块轮动状态日更存档：每交易日收盘后跑一次，把全市场板块（一级行业 / 二级行业 / 概念 / 新概念）
+# 的**轮动八态**算出来写进 rotation.json，供控制台「板块轮动」页 + 「当前市场主线」页直读。
+# 数据源=同花顺板块日线（东财 push2 系间歇性 UND_ERR_SOCKET，不可作主口径）。
+#
+# cron 用 UTC：北京 17:30 = UTC 9:30（收盘后 1.5 小时；与 fng 16:05 / flow 16:10 / style 15:40 错开）
+# ⚠️ 非交易日（A 股节假日）在这里是**照常触发**的：cron 的 1-5 只认工作日。
+#    脚本内有交易日闸门（trade-day.js）→ 非交易日打印一行后直接退出、不写盘、不产生 commit。
+on:
+  schedule:
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rotation-daily
+  cancel-in-progress: false
+
+jobs:
+  rotation:
+    runs-on: ubuntu-latest
+    # 稳态 594 板块 × 2 个年度文件 ≈ 1200 个请求（约 3~6 分钟）；
+    # 首次或遇 504 限流走指数退避，给足预算。脚本内另有 60% 成功率闸门，不达标不写盘。
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Update sector rotation archive
+        run: node rotation.js
+
+      - name: Commit archive
+        run: |
+          git add rotation.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update sector rotation archive [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "存档无变化"
+          fi
