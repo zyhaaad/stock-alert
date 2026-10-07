@@ -34,6 +34,7 @@ const fs = require('fs')
 const path = require('path')
 const C = require('./chip-core.js')
 const S = require('./signal-core.js')
+const TD = require('./trade-day.js')   /* 交易日判定单一真源（2026-10-07） */
 
 const SRC = __dirname
 const OUT_PATH = path.join(SRC, 'chips-history.json')
@@ -275,6 +276,20 @@ async function main() {
 
   const cfg = loadCfg()
   const hist = loadHist()
+
+  /* 交易日闸门（2026-10-07）：非交易日不重算、不覆盖快照。
+   * 病根：cron 是工作日制（不认 A 股节假日），国庆假期里 chips.js 每跑一次就拿
+   *      上一交易日（09-30）的数据重算一遍、把 updatedAt 写成假期日期，实测
+   *      chips-history.json 被覆盖成 updatedAt=2026-10-06 而数据其实是 09-30 的
+   *      → 控制台显示「更新于 10-06」误导人；同时白烧 Actions 配额。
+   * --show 单只诊断不受限（它只打印、不写盘）。判定口径见 trade-day.js。 */
+  if (!showCode) {
+    const g = await TD.gate()
+    if (g.isTrading === false) {
+      console.log('非交易日（' + TD.describe(g) + '）→ 跳过，不覆盖透视快照')
+      return
+    }
+  }
 
   /* 三份来源合并去重：持仓 + 监控 + 最新推荐 */
   const nameOf = {}
