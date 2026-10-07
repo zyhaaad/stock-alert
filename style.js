@@ -620,26 +620,52 @@ async function main() {
     pickNote = '情绪 ' + cycle.cycle + '，不出票（宁可空仓）'
     console.log('  ' + pickNote)
   } else {
+    /* ⚠️ 2026-10-07 健壮性修复：上游**任一环 502 曾把整条优选流水线打断**。
+       线上实录：2026-09-24 与 09-30 两天（恰好都是「题材主升浪」）的 pickNote 就是
+       「优选停算：返回不是 JSON：<html>… 502 Bad Gateway …」，picks=[]。
+       用户最需要个股的两天恰好没票 —— 改成**分源降级**：
+         · 板块资金流挂了 → 只丢「来源 A」，来源 B（涨停池低位板）照常出票；
+         · 个股资金流榜挂了 → 同样只丢来源 A。
+       来源 B 只用**本地已经拿到的**涨停池 emo.rows，不依赖任何联网接口，
+       所以在「题材主升浪」这种主线明确的日子里它是可靠的那条腿。 */
+    let degradedA = ''
+    sectors = []
     try {
       sectors = await fetchSectorFlow()
-      const sectorRankOf = name => {
-        const i = sectors.findIndex(s => s.name === name)
-        return i >= 0 ? i + 1 : 99
+    } catch (e) {
+      degradedA = '板块资金流不可得'
+      notes.push(degradedA + '，来源 A 跳过')
+      console.log('  ⚠️ ' + degradedA + '（' + e.message + '）→ 来源 A 跳过，只用涨停池来源 B')
+    }
+    const sectorRankOf = name => {
+      const i = sectors.findIndex(s => s.name === name)
+      return i >= 0 ? i + 1 : 99
+    }
+    const seen = {}
+    let cands = []
+    /* 来源 A：主力净流入榜（板块在流入前 20 或与主线同名）—— 独立 try，挂了不影响来源 B */
+    if (sectors.length) {
+      try {
+        const topStocks = await fetchStockFlowTop()
+        for (const r of topStocks) {
+          if (cands.length >= C.candLimit) break
+          const g = guardCandidate(r)
+          if (g) continue
+          if (seen[r.code]) continue
+          const rank = sectorRankOf(r.sector)
+          if (rank > 20 && r.sector !== themes.leadTheme) continue
+          seen[r.code] = 1
+          cands.push(Object.assign({ from: 'flow', sectorRank: rank }, r))
+        }
+      } catch (e) {
+        degradedA = degradedA || '个股资金流榜不可得'
+        notes.push(degradedA + '，来源 A 跳过')
+        console.log('  ⚠️ ' + degradedA + '（' + e.message + '）→ 来源 A 跳过')
       }
-      const topStocks = await fetchStockFlowTop()
-      const seen = {}
-      let cands = []
-      /* 来源 A：主力净流入榜（板块在流入前 20 或与主线同名） */
-      for (const r of topStocks) {
-        if (cands.length >= C.candLimit) break
-        const g = guardCandidate(r)
-        if (g) continue
-        if (seen[r.code]) continue
-        const rank = sectorRankOf(r.sector)
-        if (rank > 20 && r.sector !== themes.leadTheme) continue
-        seen[r.code] = 1
-        cands.push(Object.assign({ from: 'flow', sectorRank: rank }, r))
-      }
+    } else {
+      console.log('  板块资金流缺 → 来源 A 跳过')
+    }
+    try {
       /* 来源 B：涨停池低位板（题材主线内，非尾盘偷袭、炸板 ≤1） */
       if (emo.rows && emo.rows.length) {
         const topThemes = themes.themesToday.map(t => t.name)
@@ -704,6 +730,9 @@ async function main() {
       pickNote = picks.length
         ? ('优选 ' + picks.length + ' 只' + (pend ? '（含 ' + pend + ' 只天量待确认递补）' : ''))
         : '候选全部被闸门拦下（宁缺毋滥）'
+      /* 降级要如实写在明面上：让人知道这批票只走了「涨停池来源 B」，
+         而不是以为资金流榜也参与了打分（2026-10-07）。 */
+      if (degradedA) pickNote += '（' + degradedA + '，本次只走涨停池来源 B）'
       console.log('  ' + pickNote)
       for (const p of picks) console.log('  ★ ' + p.name + ' ' + p.code + ' ' + p.score + '分 ' + p.reasons.join('；'))
     } catch (e) { notes.push('优选停算：' + e.message); pickNote = '优选停算：' + e.message }
