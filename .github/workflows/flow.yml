@@ -21,8 +21,12 @@ concurrency:
 jobs:
   flow:
     runs-on: ubuntu-latest
-    # 增量回补后稳态只发 4 个 clist（约 10 秒）；首次/缺口大时最多 8 分钟预算线（脚本内自控）
-    timeout-minutes: 15
+    # ⚠️ 15 分钟**不够**：2026-10-08、10-09 两次 run 都在 15 分 17 秒处被判 cancelled
+    #    （started 08:23:49Z → completed 08:39:06Z），即被这条超时线掐断，
+    #    ⇒ 存档停在 09-30、页面一直显示旧数据。
+    #    脚本内虽有 8 分钟预算线，但只覆盖 daykline 回补，网络重试堆积时会超出去。
+    #    先放宽到 30 分钟止血，同时脚本侧要收紧单次重试上限（见 flow-daily.js 注释）。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
