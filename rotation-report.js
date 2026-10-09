@@ -57,7 +57,14 @@
     var dataDate = ''
     for (var i = 0; i < keep.length; i++) if (keep[i].date > dataDate) dataDate = keep[i].date
     var synced = keep.filter(function (r) { return r.date === dataDate })
-    var dropped = keep.length - synced.length
+    /* ★ 日期不一致的板块（停牌 / 新板块 / 同花顺当日还没更新）**不再剔除**。
+     * 剔除的代价是页面板块数量骤变：实测 2026-10-09 那次只剩 277/594，
+     * 用户在页面上的直观感受是「一片板块凭空消失了」，这比显示旧数据更容易误判。
+     * 改成保留并打 stale:1 —— 当日榜单与主线判定只取 synced，
+     * 陈旧条目仍可查询，由前端如实标注。 */
+    var staleRows = keep.filter(function (r) { return r.date !== dataDate })
+    for (var q0 = 0; q0 < staleRows.length; q0++) staleRows[q0].stale = 1
+    var dropped = staleRows.length
 
     var counts = {}, hyCounts = {}
     STATE_ORDER.forEach(function (s) { counts[s] = 0; hyCounts[s] = 0 })
@@ -82,7 +89,8 @@
       generated: new Date().toISOString(),
       dropped: dropped,
       market: {
-        count: synced.length,
+        count: synced.length,        /* 当日同步成功的板块数（榜单/主线只取这些） */
+        total: keep.length,          /* 板块总数（含 stale；页面展示总数用这个，避免数量骤变） */
         counts: counts,
         industry: {
           count: hy.length,
@@ -94,7 +102,7 @@
         },
         focusTop10: hyAmtTot > 0 ? +(hyTop10Amt / hyAmtTot).toFixed(4) : 0
       },
-      boards: byMf
+      boards: byMf.concat(staleRows)
     }
   }
 
