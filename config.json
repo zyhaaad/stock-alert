@@ -113,13 +113,6 @@
   "deleted": [],
   "holdings": [
     {
-      "code": "600703",
-      "name": "三安光电",
-      "cost": 12.5,
-      "qty": 300,
-      "addedAt": null
-    },
-    {
       "code": "000155",
       "name": "川能动力",
       "cost": 14,
