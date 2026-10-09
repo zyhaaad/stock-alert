@@ -29,6 +29,7 @@
 'use strict'
 const fs = require('fs')
 const path = require('path')
+const https = require('https')
 
 const DIR = __dirname
 const HIST_PATH = path.join(DIR, 'flow-history.json')
@@ -36,66 +37,132 @@ const DRY = process.argv.includes('--dry')
 const NOMON = process.argv.includes('--nomon')
 const KEEP = 60
 const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://quote.eastmoney.com/' }
-const MON_GAP_MS = 250   /* daykline 单并发间隔：360 板块（行业200+概念160）≈ 3-5 分钟 */
+const MON_GAP_MS = 700   /* ★ 2026-10-09 由 250ms 提到 700ms：东财对高频是**直接断连**
+                          *   （实测 ECONNRESET / UND_ERR_SOCKET / 502），250ms 连续打 589 个
+                          *   必被掐 → 整个 run 卡到超时被 cancel，存档停在 09-30。 */
 
-/* daykline 轻量重试（mon 用）：2 次尝试，避免个别 502 吃掉长退避拖垮 workflow 时限；
- * 失败板块直接跳过（mon 缺条目 → 页面端退回日档近似并标注），次日自动重试补齐 */
-async function getJSONFast(url) {
-  const wait = ms => new Promise(r => setTimeout(r, ms))
-  let lastErr
-  for (let i = 0; i < 2; i++) {
-    try {
-      const res = await fetch(url, { headers: UA })
-      if (res.ok) return res.json()
-      lastErr = new Error('HTTP ' + res.status)
-    } catch (e) { lastErr = e }
-    if (i < 1) await wait(1500)
+/* ★ 全局硬预算（2026-10-09）：workflow timeout 放宽到 30 分钟是止血，
+ *   真正的修复是让脚本自己**在预算内收尾并写盘**。超过 13 分钟立刻停止一切回补，
+ *   已拿到的 days 增量照常落盘，剩下的次日重试。 */
+const RUN_T0 = Date.now()
+const TOTAL_BUDGET_MS = 13 * 60 * 1000
+function leftMs() { return TOTAL_BUDGET_MS - (Date.now() - RUN_T0) }
+function outOfBudget() { return leftMs() <= 0 }
+
+/* ---------- 网络层：双传输 × 三域名回退（★ 2026-10-09 重写）----------
+ * 实测结论（本机 + Actions 双向验证）：
+ *   · fetch(undici) 打东财**高频即断连**：先 `UND_ERR_SOCKET: other side closed`，
+ *     攒够次数后变 HTTP 502（10-09 run 37940977435 就死在这）；
+ *   · https.get 同样会 ECONNRESET（限流与传输无关），但**带 timeout 后不会挂死**；
+ *   · 三个域名 push2 / push2delay / push2his 共享同一风控，只能当**回退通道**，
+ *     不能靠换域名突破限流 —— 真正的解药是**降频 + 退避 + 记忆上次成功的通道**。
+ * ⇒ 传输方式 [https.get, fetch] × 域名 [delay, push2, his]，按上次成功通道优先。 */
+const EM_HOSTS = ['push2delay.eastmoney.com', 'push2.eastmoney.com', 'push2his.eastmoney.com']
+const EM_METHODS = ['https', 'fetch']
+var EM_CHAN = { m: 'https', h: 'push2delay.eastmoney.com' }
+const wait = ms => new Promise(r => setTimeout(r, ms))
+
+function emSwap(url, host) { return String(url).replace(/push2(?:delay|his)?\.eastmoney\.com/, host) }
+
+function httpsGetJson(url, ms) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: UA, timeout: ms || 15000 }, res => {
+      if (res.statusCode !== 200) { res.resume(); reject(new Error('HTTP ' + res.statusCode)); return }
+      let b = ''
+      res.setEncoding('utf8')
+      res.on('data', d => (b += d))
+      res.on('end', () => { try { resolve(JSON.parse(b)) } catch (e) { reject(new Error('非 JSON：' + b.slice(0, 60))) } })
+    })
+    req.on('timeout', () => { req.destroy(); reject(new Error('超时')) })
+    req.on('error', e => reject(new Error('请求失败: ' + (e && e.message ? e.message : e))))
+  })
+}
+async function fetchGetJson(url, ms) {
+  const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null
+  const to = setTimeout(() => { try { ctl && ctl.abort() } catch (e) { } }, ms || 15000)
+  try {
+    const r = await fetch(url, { headers: UA, signal: ctl ? ctl.signal : undefined })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    return await r.json()
+  } finally { clearTimeout(to) }
+}
+
+/* 单次「全通道」尝试：按记忆通道优先，把 6 种组合轮一遍，成功即记忆并退出 */
+async function emOnce(url, ms) {
+  const methods = [EM_CHAN.m].concat(EM_METHODS.filter(x => x !== EM_CHAN.m))
+  const hosts = [EM_CHAN.h].concat(EM_HOSTS.filter(x => x !== EM_CHAN.h))
+  let lastErr = null
+  for (const m of methods) {
+    for (const h of hosts) {
+      try {
+        const u = emSwap(url, h)
+        const j = (m === 'https') ? await httpsGetJson(u, ms) : await fetchGetJson(u, ms)
+        EM_CHAN = { m: m, h: h }
+        return j
+      } catch (e) { lastErr = e }
+    }
+  }
+  throw lastErr || new Error('东财全通道不可用')
+}
+
+/* 带指数退避的重试（2 次以上才有意义；每次内部已轮 6 通道） */
+async function getJSON(url, rounds) {
+  const n = rounds === undefined ? 2 : rounds
+  let lastErr = null
+  for (let i = 0; i < n; i++) {
+    try { return await emOnce(url, 15000) } catch (e) {
+      lastErr = e
+      if (outOfBudget()) break
+      if (i < n - 1) await wait(3000 * Math.pow(2, i))   /* 3s / 6s */
+    }
   }
   throw lastErr
+}
+
+/* daykline 单次（mon 回补用）：只走记忆通道 + 一次退避，绝不吃掉长等待 */
+async function getJSONFast(url) {
+  try { return await emOnce(url, 12000) } catch (e) {
+    if (outOfBudget()) throw e
+    await wait(2000)
+    return await emOnce(url, 12000)
+  }
 }
 
 function bjToday() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
-async function getJSON(url) {
-  /* push2delay 从 Actions 间歇性 502（08:24Z 成功、12:00Z 失败实测），
-   * 退避重试 4 次：3s / 6s / 10s */
-  const wait = ms => new Promise(r => setTimeout(r, ms))
-  let lastErr
-  for (let i = 0; i < 4; i++) {
-    try {
-      const res = await fetch(url, { headers: UA })
-      if (res.ok) return res.json()
-      lastErr = new Error('HTTP ' + res.status + ' ' + url.slice(0, 80))
-      if (res.status !== 502 && res.status !== 503 && res.status !== 429) throw lastErr
-    } catch (e) {
-      /* 网络层异常（socket hang up 等）也重试，但 4xx 参数错重试无意义 */
-      if (/HTTP 4/.test(String(e && e.message)) && !/HTTP 429/.test(String(e && e.message))) throw e
-      lastErr = e
-    }
-    if (i < 3) await wait([3000, 6000, 10000][i])
-  }
-  throw lastErr
-}
-
 /* type: 2=行业板块 3=概念板块；返回 { bk: [名称, f62万元, chgBp] }
- * ⚠️ 必须走 push2delay + ut 令牌：push2 直连从 Actions 是 502/socket hang up
- *    （style.js 已踩过的坑，注释原话），push2delay 收盘后跑无延迟问题 */
+ * ⚠️ 2026-10-09 重写：
+ *   · 旧结论「必须走 push2delay」已作废 —— 三个域名共享风控，谁都会被掐；
+ *   · 两侧（流入 po=1 / 流出 po=0）**独立容错**：只做成一侧也接受，
+ *     否则一个 502 就让当日**整档**丢失（这正是 10-08/10-09 存档停在 09-30 的原因）；
+ *   · 两侧都失败才抛错（真故障，需要暴露出来）。 */
 async function fetchBoards(type, pz) {
-  /* po=1 按净流入降序（流入侧 TOP），po=0 升序（流出侧 TOP）。
-   * 两侧都要抓：只抓 po=1 会让存档没有净流出板块（2026-09-30 实测 total=80 pos=80 neg=0） */
   const mk = function (po) {
     return 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
       '&po=' + po + '&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
       '&fields=f12,f14,f2,f3,f62&ut=b2884a393a59ad64002292a3e90d46a5'
   }
-  const j1 = await getJSON(mk(1))
-  const j0 = await getJSON(mk(0))
-  const d1 = (j1 && j1.data && j1.data.diff) || []
-  const d0 = (j0 && j0.data && j0.data.diff) || []
+  const d1 = [], d0 = []
+  let e1 = null, e0 = null
+  try {
+    const j1 = await getJSON(mk(1), 3)
+    ;((j1 && j1.data && j1.data.diff) || []).forEach(x => d1.push(x))
+  } catch (e) { e1 = e }
+  if (!outOfBudget()) {
+    try {
+      const j0 = await getJSON(mk(0), 3)
+      ;((j0 && j0.data && j0.data.diff) || []).forEach(x => d0.push(x))
+    } catch (e) { e0 = e }
+  }
   const diff = d1.concat(d0)
-  if (!Array.isArray(diff) || !diff.length) throw new Error('clist 返回空（t=' + type + '）')
+  if (!Array.isArray(diff) || !diff.length) {
+    throw new Error('clist 两侧均失败（t=' + type + '）' +
+      (e1 ? ' | 流入侧:' + e1.message : '') + (e0 ? ' | 流出侧:' + e0.message : ''))
+  }
+  if (e1 || e0) console.log('⚠️ t=' + type + ' 只取到一侧（' + (e1 ? '流入侧失败:' + e1.message : '') +
+    (e0 ? '流出侧失败:' + e0.message : '') + '）→ 接受部分数据')
   const out = {}
   for (const d of diff) {
     if (!d.f12) continue
@@ -147,6 +214,9 @@ async function buildMonthIncremental(names, type, monthPrefix, days, tradeDates,
   const lastTradeDay = monthTrade.length ? monthTrade[monthTrade.length - 1] : todayStr
   let need = 0, ok = 0
   const t0 = Date.now()
+  /* 回补预算 = min(全局剩余 − 60s 预留给写盘，8 分钟)。到点**直接跳出整轮**，
+   * 不再逐个 continue（旧实现仍要空转 250ms×剩余板块，白耗时间）。 */
+  const MON_BUDGET_MS = Math.max(0, Math.min(8 * 60 * 1000, leftMs() - 60000))
   for (const bk of Object.keys(names)) {
     /* 该板块当月已有日期集合（来自日档 + 历次 daykline 回补） */
     const have = {}
@@ -161,7 +231,7 @@ async function buildMonthIncremental(names, type, monthPrefix, days, tradeDates,
       : Object.keys(have).length > 0
     if (!covered) {
       need++
-      if (Date.now() - t0 > 8 * 60 * 1000) continue   /* 8 分钟预算线，剩余次日再补 */
+      if (Date.now() - t0 > MON_BUDGET_MS) break   /* 预算到点，剩余板块次日再补 */
       try {
         const url = 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=35&klt=101&secid=90.' + bk +
           '&fields1=f1,f2,f3,f7&fields2=f51,f52'
@@ -180,7 +250,7 @@ async function buildMonthIncremental(names, type, monthPrefix, days, tradeDates,
         }
         if (added) ok++
       } catch (e) { /* 失败次日重试 */ }
-      await new Promise(r => setTimeout(r, 250))
+      await new Promise(r => setTimeout(r, MON_GAP_MS))
     }
   }
   /* mon = 当月日档求和（含刚回补的）；连续天数按月内末段方向 */
@@ -219,11 +289,19 @@ async function main() {
     return
   }
   if (g.isTrading === null) console.log('⚠️ 交易日历与行情时间戳都取不到（' + TD.describe(g) + '），按原有流程继续')
-  const ind = await fetchBoards(2, 100)
-  const con = await fetchBoards(3, 80)
+  /* 行业/概念独立容错：一侧全挂也保留另一侧，避免「一次 502 → 当日整档丢失」。
+   * 两侧全挂才抛错（这是真故障，必须让 workflow 报红以便发现）。 */
+  let ind = {}, con = {}, eInd = null, eCon = null
+  try { ind = await fetchBoards(2, 100) } catch (e) { eInd = e }
+  try { con = await fetchBoards(3, 80) } catch (e) { eCon = e }
   const nInd = Object.keys(ind).length
   const nCon = Object.keys(con).length
-  if (nInd < 50) throw new Error('行业板块数量异常：' + nInd)
+  if (!nInd && !nCon) {
+    throw new Error('行业+概念两侧均取不到数据' +
+      (eInd ? ' | 行业:' + eInd.message : '') + (eCon ? ' | 概念:' + eCon.message : ''))
+  }
+  if (eInd || eCon) console.log('⚠️ 部分数据源失败 → 只写成功的一侧（' +
+    (eInd ? '行业:' + eInd.message : '') + (eCon ? ' 概念:' + eCon.message : '') + '）')
 
   let hist = { names: {}, days: [] }
   if (fs.existsSync(HIST_PATH)) {
