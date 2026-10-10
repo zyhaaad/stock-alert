@@ -293,7 +293,7 @@ function boardStateFromMembers(members, srows, names) {
   for (const bk of Object.keys(names)) {
     const cs = members[bk]
     if (!cs || !cs.length) continue
-    let up = 0, dn = 0, fl = 0, lead = null
+    let up = 0, dn = 0, fl = 0, best = null, nLead = 0
     const chgs = []
     for (const c of cs) {
       const v = srows[c]
@@ -304,12 +304,31 @@ function boardStateFromMembers(members, srows, names) {
       chgs.push(chg)
       /* ⚠️ 比较的是 lead[2]（涨幅 bp），不是 lead[1]（名称）—— 拿字符串比数字恒为 false，
          会让"领涨股"永远停在第一个成分股上（写错过一次，靠单测抓出来）。 */
-      if (!lead || chg > lead[2]) lead = [c, v[0], chg]
+      if (!best || chg > best[2]) { best = [c, v[0], chg]; nLead = 1 }
+      else if (chg === best[2]) nLead++
     }
     if (!chgs.length) continue
+    /* ⚠️ 必须从 null 起挑：若把 lead 初值设成 best，lead[3]（净额）是 undefined，
+       则 `v[1] > lead[3]` 恒为 false ⇒ 挑不出任何一个 → 并列规则形同虚设（写完即被单测抓出）。 */
+    let lead = null
+    if (nLead > 1) {
+      /* ★ 2026-10-11（用户追问「领涨的对吗」）：并列时取谁**必须有确定性规则**。
+       *   旧写法 `chg > lead[2]` 是严格大于 → 并列保留"先遇到的"，而成分表返回顺序不稳定
+       *   ⇒ 结果不可复现，且与东财官方 f128 对不上（实测 2026-10-09 锂矿概念：
+       *   科力远 600478 与 金圆股份 000546 同为 +9.91% 涨停，官方给科力远、旧算法随机给了一个）。
+       *   规则（预注册、写死、不看结果调）：涨幅 bp 降序 → 主力净额万元 降序 → 代码 升序。
+       *   "净额更大的那个领涨"比"表里先出现的"更可解释。 */
+      for (const c of cs) {
+        const v = srows[c]
+        if (!v || v[2] !== best[2]) continue
+        if (!lead || v[1] > lead[3] || (v[1] === lead[3] && c < lead[0])) lead = [c, v[0], v[2], v[1]]
+      }
+    }
+    if (!lead) lead = best
     chgs.sort((a, b) => a - b)
     const med = chgs[chgs.length >> 1]
-    s[bk] = [up, dn, fl, med, lead[0], lead[1], lead[2]]
+    /* 第 8 位 = 并列只数（1 = 唯一）。前端并列 >1 时如实标「(并列N只)」，不让人误以为只有一个龙头。 */
+    s[bk] = [up, dn, fl, med, lead[0], lead[1], lead[2], nLead]
     nb++
   }
   return { s: s, nb: nb }
@@ -363,7 +382,7 @@ async function stkCheck() {
       stk.m[bk].map(x => x[1] + '(' + (x[2] / 1e4).toFixed(2) + '亿)').join(' '))
     if (s.length) console.log('     状态: 涨' + s[0] + '/跌' + s[1] + '/平' + s[2] + ' 扩散 ' +
       (s[0] / Math.max(1, s[0] + s[1] + s[2]) * 100).toFixed(1) + '% 中位涨幅 ' + (s[3] / 100).toFixed(2) +
-      '% 领涨 ' + s[5] + '(' + (s[6] / 100).toFixed(2) + '%)')
+      '% 领涨 ' + s[5] + '(' + (s[6] / 100).toFixed(2) + '%)' + (s[7] > 1 ? '（并列' + s[7] + '只）' : ''))
   }
   if (DRY) { console.log('[dry] 不写盘'); return }
   hist.stk = stk
