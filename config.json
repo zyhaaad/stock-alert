@@ -70,14 +70,6 @@
       "addedAt": "2026-09-21"
     },
     {
-      "code": "300433",
-      "name": "蓝思科技",
-      "condition": "lte",
-      "target": 26,
-      "enabled": true,
-      "addedAt": "2026-09-22"
-    },
-    {
       "code": "600309",
       "name": "万华化学",
       "condition": "lte",
@@ -110,7 +102,23 @@
       "addedAt": "2026-09-26"
     }
   ],
-  "deleted": [],
+  "deleted": [
+    {
+      "code": "300433",
+      "name": "蓝思科技",
+      "condition": "lte",
+      "target": 26,
+      "addedAt": "2026-09-22",
+      "removedAt": "2026-10-10T08:55:14.073Z",
+      "fire": {
+        "firstPrice": 30,
+        "firstAt": 1791438370675,
+        "lastPrice": 28.63,
+        "lastAt": 1791528151208,
+        "count": 2
+      }
+    }
+  ],
   "holdings": [
     {
       "code": "000155",
