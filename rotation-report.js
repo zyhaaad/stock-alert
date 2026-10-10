@@ -63,7 +63,12 @@
      * 改成保留并打 stale:1 —— 当日榜单与主线判定只取 synced，
      * 陈旧条目仍可查询，由前端如实标注。 */
     var staleRows = keep.filter(function (r) { return r.date !== dataDate })
-    for (var q0 = 0; q0 < staleRows.length; q0++) staleRows[q0].stale = 1
+    /* ★ 2026-10-10 修：stale 标记必须**每轮重算**。rows 里的对象会从上一次的 rotation.json
+     * 复用（prevByCode）⇒ 上一轮打的 stale:1 会**粘在对象上**，本轮已同步的板块仍带 stale。
+     * 实测 10-09 那次：真正陈旧 12 个，却标了 18 个（6 个粘滞）。前端若按此标注就会误报。
+     * 先整体清掉，再按日期重打。 */
+    for (var q0 = 0; q0 < keep.length; q0++) if (keep[q0].stale) delete keep[q0].stale
+    for (q0 = 0; q0 < staleRows.length; q0++) staleRows[q0].stale = 1
     var dropped = staleRows.length
 
     var counts = {}, hyCounts = {}
