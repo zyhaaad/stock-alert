@@ -46,7 +46,7 @@
     },
     "lastFire": {
       "price": 4.1,
-      "at": 1792994008948
+      "at": 1793081179314
     }
   },
   "0.300433": {
@@ -71,8 +71,17 @@
     "lastSent": 0
   },
   "1.600869": {
-    "met": false,
-    "lastSent": 0
+    "met": true,
+    "lastSent": 1793081179314,
+    "fireCount": 1,
+    "firstFire": {
+      "price": 14.22,
+      "at": 1793081179314
+    },
+    "lastFire": {
+      "price": 14.22,
+      "at": 1793081179314
+    }
   },
   "1.603990": {
     "met": false,
