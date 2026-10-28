@@ -37,7 +37,7 @@
     "lastSent": 0
   },
   "1.600611": {
-    "met": true,
+    "met": false,
     "lastSent": 1792648442949,
     "fireCount": 1,
     "firstFire": {
@@ -71,7 +71,7 @@
     "lastSent": 0
   },
   "1.600869": {
-    "met": true,
+    "met": false,
     "lastSent": 1793081179314,
     "fireCount": 1,
     "firstFire": {
