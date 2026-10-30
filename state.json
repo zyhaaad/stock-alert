@@ -33,20 +33,29 @@
     }
   },
   "0.002456": {
-    "met": false,
-    "lastSent": 0
+    "met": true,
+    "lastSent": 1793343326833,
+    "fireCount": 1,
+    "firstFire": {
+      "price": 5.18,
+      "at": 1793343326833
+    },
+    "lastFire": {
+      "price": 5.18,
+      "at": 1793343326833
+    }
   },
   "1.600611": {
-    "met": false,
-    "lastSent": 1792648442949,
-    "fireCount": 1,
+    "met": true,
+    "lastSent": 1793343326833,
+    "fireCount": 2,
     "firstFire": {
       "price": 4.09,
       "at": 1792648442949
     },
     "lastFire": {
-      "price": 4.1,
-      "at": 1793081179314
+      "price": 3.93,
+      "at": 1793343326833
     }
   },
   "0.300433": {
@@ -79,8 +88,8 @@
       "at": 1793081179314
     },
     "lastFire": {
-      "price": 14.32,
-      "at": 1793256710808
+      "price": 13.58,
+      "at": 1793343326833
     }
   },
   "1.603990": {
